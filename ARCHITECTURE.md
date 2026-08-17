@@ -2,61 +2,96 @@
 
 ## Scope
 
-The current repository is a Phase 1 research harness. It establishes safe discovery, normalization, observability, and target-gating primitives. It does not yet ship an MCP server or stable editor-write adapters.
+The repository is a `0.2.0-prealpha` control plane, not a production or
+universal Tilda integration. Phase 2 has a privately verified isolated-lab
+vertical slice. The public checkout contains the generic implementation,
+sanitized tests, and safety documentation; private live identifiers and raw
+editor payloads are intentionally omitted.
 
-## Implemented components
+## Runtime layers
 
-### CDP client
+```text
+MCP stdio transport
+        |
+tool schemas + bounded result contract
+        |
+control engine + policy/capability gates
+        |
+ChangeSet engine ---- publication journal/controller
+        |
+same-session browser authority (loopback CDP)
+        |
+typed adapters: Standard / T123 / Zero / page settings / page HEAD / lifecycle
+        |
+Tilda authenticated editor runtime
+```
 
-`src/research/cdp-client.ts` discovers browser targets, selects an exact Tilda tab, evaluates read-only probes, and receives CDP events.
+### MCP surface
 
-### Inventory and status
+`src/mcp/` owns the protocol-independent tool names, input/output schemas,
+bounded payload policy, and stdio server. Every result is structured and carries
+an explicit code, state-change flag, target, and evidence/diagnostic reference.
 
-`inventory.ts` reads semantic project cards from an authenticated page. `status.ts` reports CDP reachability, target identity, authentication signals, editor fingerprints, and fail-closed safety state.
+### Control and authority
 
-### Configuration and target gates
+`src/control/` composes adapters with one exact browser session. It discovers a
+dedicated authenticated Tilda tab, performs a fresh same-session inventory and
+binding, checks the exact project/page/record target, and exposes only fixed
+semantic operations. The authority intentionally does not expose arbitrary CDP
+evaluation, arbitrary navigation, or a general JavaScript escape hatch.
+The page-specific HEAD port requires the exact editor route, current-code
+compare-before-write, bounded full-value handling, and two post-dispatch
+rereads. It has no publication method.
 
-`config.ts` validates canonical numeric IDs, exact project/page tuples, disjoint lab and read-only sets, complete live inventory coverage, account fingerprint matching, and canonical inventory hashes.
+### ChangeSets and recovery
 
-The checked-in environment is deliberately unusable for writes. Account fingerprints and inventory hashes belong only in ignored local state.
+`src/core/` stores content-free snapshots and append-only events beneath the
+ignored `.tilda-runtime/` directory. It validates canonical IDs, expected
+revision/hash, idempotency keys, stale events, locks, path containment, and
+symlink boundaries. Apply, verify, and rollback are distinct operations. An
+ambiguous result is journaled and quarantined; the engine never blindly retries.
+The HEAD adapter's unstable reread errors are intentionally not reconciled to
+success even if a later diagnostic hash happens to match, because that would
+erase evidence of a normalization or timing ambiguity.
 
-### Sanitized Observatory
+### Adapters
 
-`observatory.ts` captures a deliberately narrow subset of request, response, console, and mutation metadata. `security/sanitize.ts` redacts headers, query parameters, bodies, PII-shaped fields, and unsafe nested structures before persistence. Sanitizer failure aborts persistence.
+`src/adapters/` translates narrow, evidence-backed semantic requests into
+authority-owned browser calls. Unknown fields are preserved. The implemented
+contracts are deliberately small: selected Standard fields, T123 code, a few
+Zero model transitions, one page SEO field, and one fixed page-lifecycle
+transaction. Page-specific HEAD replacement is another typed operation inside
+that same ChangeSet engine. These contracts are not a general Tilda schema;
+site-wide HEAD is a separate, unproven surface.
 
-## Evidence promotion path
+### Research and observability
 
-An undocumented candidate moves through these states:
+`src/research/` contains CDP discovery, inventory binding, hashing, browser
+session probes, and a loopback-only sanitized Observatory. Sensitive values are
+used transiently for verification or HMAC derivation and are not persisted in
+the public package.
 
-1. source observed;
-2. live observed in an authorized session;
-3. live reproduced on an allowlisted lab target;
-4. canary verified against the current editor fingerprint;
-5. exposed through a stable MCP capability.
+## Evidence promotion
 
-Only the first two states exist for editor operations in this public pre-alpha package.
+An undocumented behavior moves through explicit evidence states:
 
-## Target architecture
+1. source-observed hypothesis;
+2. live observation in an authorized session;
+3. reproduced reversible lab operation;
+4. canary/restart verification against the current editor fingerprint;
+5. a narrowly named MCP capability.
 
-The intended system separates:
+The private Phase 2 run reached the last state for the listed vertical-slice
+operations. Public users must reproduce and review their own account-bound
+lab evidence before enabling writes. A class being present in the registry is
+not proof that a remote transport is safe for a different account or editor
+release.
 
-- official Tilda API adapters;
-- authenticated editor adapters;
-- runtime-model adapters;
-- CDP/semantic DOM fallbacks;
-- a policy and approval engine;
-- structured ChangeSets;
-- verification and restore;
-- MCP transport and tool schemas;
-- compatibility canaries and editor-drift detection.
+## Deliberate gaps
 
-The separation prevents a UI fallback from silently becoming the contract for a supposedly semantic tool.
-
-## Known architectural gaps
-
-- No MCP transport or public tool schemas.
-- No public, live-reproduced editor-write adapter.
-- No executable immutable ledger for historical read-only source projects.
-- No published compatibility corpus; private project fixtures are intentionally excluded.
-- No end-to-end publish proof in the public package.
-- No cross-version adapter repair loop.
+The public package does not claim arbitrary editor writes, all Standard block
+families, all Zero element types or breakpoints, assets, catalog/forms,
+cross-project moves, trash recovery, a documented Tilda write API, or production
+reliability. Site-wide HEAD and Advanced Interface Mode compatibility are Phase
+3 evidence gates. Editor drift must quarantine an adapter until a fresh lab
+proof is available.

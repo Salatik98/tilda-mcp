@@ -5,6 +5,8 @@ import { buildSafetyStatus } from "../../src/research/status.js";
 function config(overrides: Partial<ResearchConfig> = {}): ResearchConfig {
   return {
     cdpUrl: "http://127.0.0.1:9222",
+    bindingKeyPath: "C:\\workspace\\.tilda-runtime\\account-binding.key",
+    bindingStatePath: "C:\\workspace\\.tilda-runtime\\account-binding.json",
     observatoryHost: "127.0.0.1",
     observatoryPort: 4765,
     accountFingerprint: "b".repeat(64),
@@ -12,6 +14,7 @@ function config(overrides: Partial<ResearchConfig> = {}): ResearchConfig {
     labProjectIds: ["123"],
     readOnlyProjectIds: ["999", "1001", "1002"],
     labPageTargets: [{ projectId: "123", pageId: "9001" }],
+    labRecordTargets: null,
     publicTestDomains: null,
     officialApiConfigured: false,
     ...overrides,

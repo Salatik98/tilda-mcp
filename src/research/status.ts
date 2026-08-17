@@ -7,22 +7,81 @@ import {
   selectTildaTarget,
 } from "./cdp-client.js";
 import type { ResearchConfig } from "./config.js";
-import { isWriteAllowlistSyntacticallyValid } from "./config.js";
+import {
+  assertLabPageTarget,
+  assertLabProjectTarget,
+  isConfiguredLiveBindingMatch,
+  isWriteAllowlistSyntacticallyValid,
+} from "./config.js";
+import {
+  captureTrustedLiveBinding,
+  isFreshTrustedBindingCapture,
+  type TrustedBindingBlocked,
+  type TrustedBindingCapture,
+} from "./inventory.js";
 
 export type AuthenticationState = "authenticated" | "authentication_required" | "unknown";
 
-export function buildSafetyStatus(config: ResearchConfig): TildaStatus["safety"] {
+export function buildSafetyStatus(
+  config: ResearchConfig,
+  bindingCapture: TrustedBindingCapture | null = null,
+): TildaStatus["safety"] {
+  const liveInventory = isFreshTrustedBindingCapture(bindingCapture)
+    ? bindingCapture.inventory
+    : null;
   const syntacticallyValidProjectAllowlist = isWriteAllowlistSyntacticallyValid(config);
+  const liveBindingMatched =
+    liveInventory !== null && isConfiguredLiveBindingMatch(config, liveInventory);
+  let writePreflightWouldPass = false;
+  if (
+    syntacticallyValidProjectAllowlist &&
+    liveBindingMatched &&
+    config.labProjectIds !== null &&
+    config.labProjectIds.length > 0
+  ) {
+    try {
+      for (const projectId of config.labProjectIds) {
+        assertLabProjectTarget(config, { projectId }, liveInventory);
+      }
+      writePreflightWouldPass = true;
+    } catch {
+      writePreflightWouldPass = false;
+    }
+  }
+
+  let pageWritePreflightWouldPass = false;
+  if (
+    writePreflightWouldPass &&
+    liveInventory !== null &&
+    config.labPageTargets !== null &&
+    config.labPageTargets.length > 0
+  ) {
+    try {
+      for (const target of config.labPageTargets) {
+        assertLabPageTarget(config, target, liveInventory);
+      }
+      pageWritePreflightWouldPass = true;
+    } catch {
+      pageWritePreflightWouldPass = false;
+    }
+  }
+
   return {
     labAllowlistConfigured: config.labProjectIds !== null,
-    allowlistBoundToInventory:
-      config.accountFingerprint !== null && config.inventoryHash !== null,
+    liveInventoryCaptured: liveInventory !== null,
+    allowlistBoundToInventory: liveBindingMatched,
     readOnlyCorpusProtected: config.readOnlyProjectIds !== null,
     labPageTargetsConfigured: config.labPageTargets !== null,
     projectAllowlistSyntacticallyValid: syntacticallyValidProjectAllowlist,
-    // Live account/inventory matching is intentionally not implemented yet; global state stays blocked.
+    // A serialized status result is never a write authorization. A future write
+    // adapter must own the exact connection and repeat/consume its preflight
+    // inside one transaction before it may expose an unblocked internal gate.
     writesBlocked: true,
     pageWritesBlocked: true,
+    writePreflightWouldPass,
+    pageWritePreflightWouldPass,
+    requiresFreshWriteTimeCapture: true,
+    writeAuthorizationReusable: false,
     officialApiConfigured: config.officialApiConfigured,
   };
 }
@@ -42,13 +101,25 @@ export interface TildaStatus {
   };
   safety: {
     labAllowlistConfigured: boolean;
+    liveInventoryCaptured: boolean;
     allowlistBoundToInventory: boolean;
     readOnlyCorpusProtected: boolean;
     labPageTargetsConfigured: boolean;
     projectAllowlistSyntacticallyValid: boolean;
     writesBlocked: boolean;
     pageWritesBlocked: boolean;
+    writePreflightWouldPass: boolean;
+    pageWritePreflightWouldPass: boolean;
+    requiresFreshWriteTimeCapture: true;
+    writeAuthorizationReusable: false;
     officialApiConfigured: boolean;
+  };
+  binding: {
+    capture: "BOUND" | "BLOCKED" | "NOT_ATTEMPTED";
+    code: string | null;
+    message: string | null;
+    projectCount: number | null;
+    pageCount: number | null;
   };
   editorFingerprint: Record<string, unknown> | null;
   error: { code: string; message: string } | null;
@@ -119,7 +190,7 @@ function authenticationFromProbe(probe: PageProbe): AuthenticationState {
 }
 
 export async function getTildaStatus(config: ResearchConfig): Promise<TildaStatus> {
-  const safety = buildSafetyStatus(config);
+  const baselineSafety = buildSafetyStatus(config);
 
   try {
     const [version, targets] = await Promise.all([
@@ -137,7 +208,14 @@ export async function getTildaStatus(config: ResearchConfig): Promise<TildaStatu
           route: null,
           title: null,
         },
-        safety,
+        safety: baselineSafety,
+        binding: {
+          capture: "NOT_ATTEMPTED",
+          code: "TILDA_TARGET_NOT_FOUND",
+          message: "No authenticated Tilda target was available for a trusted binding capture.",
+          projectCount: null,
+          pageCount: null,
+        },
         editorFingerprint: null,
         error: { code: "TILDA_TARGET_NOT_FOUND", message: "No Tilda page is open in the CDP browser." },
       };
@@ -155,6 +233,18 @@ export async function getTildaStatus(config: ResearchConfig): Promise<TildaStatu
         domAnchors: probe.domAnchors,
       };
 
+      let bindingCapture: TrustedBindingCapture;
+      try {
+        bindingCapture = await captureTrustedLiveBinding(config);
+      } catch (error) {
+        bindingCapture = {
+          status: "BLOCKED",
+          code: "CAPTURE_FAILED",
+          message: error instanceof Error ? error.message : "Trusted binding capture failed.",
+        } satisfies TrustedBindingBlocked;
+      }
+      const safety = buildSafetyStatus(config, bindingCapture);
+
       return {
         ok: true,
         cdp: { reachable: true, browser: version.Browser, targetCount: targets.length },
@@ -165,6 +255,22 @@ export async function getTildaStatus(config: ResearchConfig): Promise<TildaStatu
           title: probe.title,
         },
         safety,
+        binding:
+          bindingCapture.status === "BOUND"
+            ? {
+                capture: "BOUND",
+                code: null,
+                message: null,
+                projectCount: bindingCapture.projectCount,
+                pageCount: bindingCapture.pageCount,
+              }
+            : {
+                capture: "BLOCKED",
+                code: bindingCapture.code,
+                message: bindingCapture.message,
+                projectCount: null,
+                pageCount: null,
+              },
         editorFingerprint,
         error: null,
       };
@@ -182,7 +288,14 @@ export async function getTildaStatus(config: ResearchConfig): Promise<TildaStatu
         route: null,
         title: null,
       },
-      safety,
+      safety: baselineSafety,
+      binding: {
+        capture: "NOT_ATTEMPTED",
+        code,
+        message: error instanceof Error ? error.message : String(error),
+        projectCount: null,
+        pageCount: null,
+      },
       editorFingerprint: null,
       error: { code, message: error instanceof Error ? error.message : String(error) },
     };

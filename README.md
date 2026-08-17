@@ -1,81 +1,50 @@
-# Tilda Agent OS
+# Tilda Agent OS / Tilda MCP
 
-**Status: Pre-alpha / active development**
+**Status: 0.2.0-prealpha — Phase 2 vertical slice complete in an isolated
+authorized lab; active development continues.**
 
-Tilda Agent OS is an open-source agentic development layer for Tilda that aims to let AI coding agents inspect, edit, build, test, and maintain Tilda websites through semantic machine interfaces instead of fragile cursor-based UI automation.
+Tilda Agent OS is an open-source control plane that lets coding agents work
+with a visual Tilda editor through bounded, machine-readable operations. It
+combines same-session browser authority, typed ChangeSets, exact target gates,
+post-operation rereads, rollback, and separate publication controls.
 
-This repository is currently a research harness, **not a production MCP server**. Core editor primitives are being empirically validated on isolated research targets before any capability is promoted to a stable interface.
+This repository is a pre-alpha candidate, not a production or universal Tilda
+MCP. The public package intentionally contains no real account/project/page/
+record IDs, client content, domains, browser state, raw traces, or private live
+fixtures. The narrow live vertical slice was verified privately in an isolated
+lab; the public checkout is the reproducible code and unit-test surface, not a
+replayable copy of that account.
 
-## Why this project exists
+## What is here
 
-Coding agents work well with source files, Git, CLIs, APIs, databases, and infrastructure. Visual SaaS development environments are harder: an agent often has to search the screen, click controls, enter text, and depend on layout, timing, and interface language.
+- A local MCP stdio server with eleven bounded tools: status, capabilities,
+  exact reads, ChangeSet plan/apply/verify/rollback, separate publish and
+  unpublish requests, public verification, and one fixed page-lifecycle
+  transaction.
+- Typed ChangeSet and snapshot storage with stale-state checks, idempotency,
+  append-only journal events, fail-closed recovery, and symlink/path guards.
+- Adapter contracts for the narrow, evidence-backed `standard.field.patch`,
+  `t123.code.replace`, Zero Block leaf/responsive/clone transitions, and
+  `page.seo.patch` operations, plus a full page-specific HEAD read and
+  `page.head.code.replace` lifecycle that never publishes as a side effect.
+- A loopback CDP browser authority that rebinds to the current authenticated
+  session and keeps editor reads, writes, and publication in one explicit
+  target-gated workflow.
+- Sanitized observability and a public read-only MCP smoke that uses no live
+  target IDs and performs no remote writes.
 
-Tilda's [documented public API](https://help-ru.tilda.cc/api) exposes project/page reads and exports. It does not document a comprehensive write interface for ordinary editor operations. Tilda Agent OS investigates a safer control layer composed from:
+The private Phase 2 evidence covered reversible Standard and T123 changes,
+narrow Zero and SEO changes, page-specific HEAD replacement, page lifecycle,
+separate publication/public verification, a source-project rejection, and a
+dedicated-browser restart/rebind followed by a read-only MCP smoke. Those
+claims are deliberately scoped to the exact tested lab/editor/runtime shapes;
+they do not imply support for every Tilda block, field, breakpoint, account,
+or editor release.
 
-- official APIs where they apply;
-- authenticated application operations only after empirical validation;
-- editor runtime models;
-- Chrome DevTools Protocol (CDP);
-- semantic DOM fallbacks;
-- structured change plans and exact target gates;
-- post-operation verification and restore.
+## Quick start
 
-The broader research question is how coding agents can safely operate closed visual development environments without pretending that cursor automation is a stable API.
-
-## What exists today
-
-Implemented and locally tested:
-
-- CDP discovery and exact Tilda-tab selection;
-- read-only project inventory primitives;
-- canonical hashing of machine-readable state;
-- fail-closed project/page allowlist validation;
-- account/inventory binding checks for write targets;
-- a loopback-only Observatory that sanitizes captured metadata before persistence;
-- a status CLI that reports browser and safety state;
-- unit and security tests for the research harness.
-
-Empirically observed but not yet a stable public capability:
-
-- semantic project/page identity in an authenticated Tilda session;
-- block identity for standard blocks, T123, and Zero Block;
-- isolated semantic-UI project/page lifecycle operations.
-
-Under investigation:
-
-- standard-block settings reads and minimal field patches;
-- T123 raw-code reads and reversible patches;
-- Zero Block raw-model reads and raw-preserving patches;
-- page settings, lifecycle, and publication contracts.
-
-See [CAPABILITIES.md](CAPABILITIES.md) for the status ledger. No undocumented write or publish operation is claimed as reproduced in this public package.
-
-## Architecture
-
-The current implementation is a research control plane:
-
-1. Discover a dedicated, authenticated Tilda browser target through CDP.
-2. Read and normalize machine-visible state.
-3. Bind any future write allowlist to an account fingerprint and complete inventory hash.
-4. Require exact project/page identity before an operation.
-5. Capture only sanitized observability metadata.
-6. Promote an adapter only after snapshot, one-change, reread, exact-diff, restore, and restoration verification.
-
-The intended MCP layer is downstream of this evidence pipeline. See [ARCHITECTURE.md](ARCHITECTURE.md).
-
-## Installation
-
-Requirements: Node.js 20+, pnpm, and Chrome or Chromium with remote debugging enabled.
-
-```bash
-cp .env.example .env
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm test
-pnpm build
-```
-
-On Windows PowerShell:
+Requirements: Node.js 20+, pnpm 11+, and (only for local authenticated research)
+a dedicated Chrome/Chromium profile with remote debugging enabled.
 
 ```powershell
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
@@ -83,50 +52,55 @@ pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test
 pnpm build
+pnpm smoke:mcp
 ```
 
-Start a dedicated browser profile yourself and sign in manually. Never place browser credentials, cookies, storage state, or a real profile in this repository.
+The public smoke checks the local MCP protocol, eleven tool registrations,
+structured capability output, and structured status output. It does not log in,
+open a live target, mutate Tilda, publish anything, or require account IDs.
 
-## Current commands
+For Codex, the project-scoped configuration is in
+[`.codex/config.toml`](.codex/config.toml). Start the server manually with
+`pnpm mcp`; stdout is reserved for MCP JSON-RPC and diagnostics go to stderr.
 
-```bash
-pnpm tilda status
-pnpm tilda inventory
-pnpm observatory
-```
+## Safety boundary
 
-`status` and `inventory` are research commands, not MCP tools. With the checked-in fail-closed configuration, writes stay blocked.
+- Use only accounts and projects the operator is authorized to operate.
+- Treat every pre-existing project as read-only; use a dedicated isolated lab
+  for experiments.
+- Build a local ignored read-only inventory and exact lab allowlist before any
+  write. The public package ships no account-specific ledger, so an unconfigured
+  checkout remains fail-closed.
+- Every edit follows read → snapshot → dry-run → one semantic mutation →
+  reread → exact diff → restore → reread restore.
+- Editing never publishes. Publication and unpublication are separate,
+  approval-gated operations.
+- Never commit credentials, cookies, auth/CSRF data, browser profiles, HAR or
+  raw traces, Leads, orders, PII, proprietary content, or real Tilda IDs.
+- An ambiguous or failed undocumented write is quarantined. Do not blindly
+  retry it.
 
-## Codex integration
+See [`SECURITY.md`](SECURITY.md), [`ARCHITECTURE.md`](ARCHITECTURE.md), and
+[`CAPABILITIES.md`](CAPABILITIES.md) for the claim and evidence boundaries.
 
-Codex can currently work with this repository as a normal codebase: run tests, inspect the status output, implement evidence-backed probes, and review sanitized artifacts. The planned MCP server and its tool schemas do not exist yet.
+## Why this matters
 
-Proposed future interactions such as `tilda.page.inspect`, `tilda.block.patch`, or `tilda.page.publish` are design targets only. They must not be presented as callable until implementation and live evidence are published.
+Coding agents already have reliable machine interfaces for source files, Git,
+CLIs, APIs, and databases. Visual SaaS editors are different: cursor-based
+automation is fragile, while undocumented runtime requests can be unsafe. This
+project explores a portable pattern for operating such environments with
+explicit identity, reversible transactions, evidence labels, and human approval
+at consequential gates.
 
-## Safety model
+## Scope and roadmap
 
-- Treat every pre-existing project as read-only source material.
-- Use only a dedicated, explicitly allowlisted lab for experiments.
-- Require exact `(projectId, pageId)` ownership for page-scoped operations.
-- Keep editing and publication as separate operations and approval gates.
-- Follow read -> snapshot -> dry-run -> one mutation -> reread -> diff -> restore -> reread.
-- Never persist secrets, session material, Leads, orders, customer PII, or proprietary page content.
-- Block on ambiguous identity, stale state, sanitizer failure, or adapter drift.
+The current release is a narrow pre-alpha vertical slice. It does not claim a
+general editor-write API, arbitrary page/record access, all Zero families,
+assets, catalog/forms, cross-project moves, trash recovery, site-wide HEAD,
+Advanced Interface Mode compatibility, or production reliability. See
+[`ROADMAP.md`](ROADMAP.md) for the next evidence gates.
 
-The public harness does not yet persist an immutable historical source-project ledger; maintainers must keep historical source IDs in their local read-only configuration. An executable encrypted/local ledger is on the roadmap.
+## License
 
-> **Important:** because the public package has no private historical denylist, do not configure or attempt a write on an account that already contains non-lab projects. This limitation is acceptable for read-only research but blocks a safe public write workflow until the immutable local ledger is implemented.
-
-## Examples
-
-Only verified local research commands are shown above. Editor-write examples will be added one by one after their adapters pass the full reversible lab protocol. See [CAPABILITIES.md](CAPABILITIES.md) for planned examples and their gates.
-
-## Roadmap and contributing
-
-See [ROADMAP.md](ROADMAP.md) and [CONTRIBUTING.md](CONTRIBUTING.md). Evidence, safety tests, sanitized fixtures, and compatibility canaries are especially welcome.
-
-## License and disclaimer
-
-Licensed under the [Apache License 2.0](LICENSE).
-
-Tilda is a trademark of its respective owner. This independent project is not affiliated with, endorsed by, or supported by Tilda. The documented public API should be preferred. Any experimental editor integration may depend on undocumented behavior, may break without notice, and must be used only on accounts and projects you are authorized to operate.
+Apache-2.0. Tilda is a trademark of its respective owner. This independent
+project is not affiliated with, endorsed by, or supported by Tilda.

@@ -33,8 +33,56 @@ export class CdpUnavailableError extends Error {
   }
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "localhost" ||
+    normalized === "[::1]" ||
+    normalized === "::1"
+  );
+}
+
+export function normalizeLoopbackCdpBaseUrl(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new CdpUnavailableError("CDP URL is invalid.");
+  }
+  if (
+    parsed.protocol !== "http:" ||
+    !isLoopbackHostname(parsed.hostname) ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    (parsed.pathname !== "/" && parsed.pathname !== "") ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
+    throw new CdpUnavailableError(
+      "CDP must be an unauthenticated loopback HTTP endpoint (127.0.0.1, localhost, or ::1).",
+    );
+  }
+  return parsed.origin;
+}
+
+export function isLoopbackCdpWebSocketUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (
+      parsed.protocol === "ws:" &&
+      isLoopbackHostname(parsed.hostname) &&
+      parsed.username === "" &&
+      parsed.password === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 function endpoint(baseUrl: string, path: string): URL {
-  return new URL(path, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+  const normalized = normalizeLoopbackCdpBaseUrl(baseUrl);
+  return new URL(path, `${normalized}/`);
 }
 
 async function fetchJson<T>(url: URL, timeoutMs = 3_000): Promise<T> {
@@ -84,6 +132,9 @@ export class CdpConnection {
   }
 
   static async connect(webSocketUrl: string, timeoutMs = 5_000): Promise<CdpConnection> {
+    if (!isLoopbackCdpWebSocketUrl(webSocketUrl)) {
+      throw new CdpUnavailableError("Refusing a non-loopback CDP WebSocket target.");
+    }
     const socket = new WebSocket(webSocketUrl);
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -192,7 +243,10 @@ export class CdpConnection {
 
 export function selectTildaTarget(targets: readonly CdpTarget[]): CdpTarget | null {
   const pages = targets.filter(
-    (target) => target.type === "page" && target.webSocketDebuggerUrl !== undefined,
+    (target) =>
+      target.type === "page" &&
+      target.webSocketDebuggerUrl !== undefined &&
+      isLoopbackCdpWebSocketUrl(target.webSocketDebuggerUrl),
   );
   return (
     pages.find((target) => {
@@ -203,6 +257,38 @@ export function selectTildaTarget(targets: readonly CdpTarget[]): CdpTarget | nu
           host.endsWith(".tilda.cc") ||
           host === "tilda.ru" ||
           host.endsWith(".tilda.ru")
+        );
+      } catch {
+        return false;
+      }
+    }) ?? null
+  );
+}
+
+/**
+ * Select only the top-level projects inventory route. A project detail or editor
+ * tab is not sufficient evidence for a complete account inventory.
+ */
+export function selectTildaProjectsTarget(
+  targets: readonly CdpTarget[],
+): CdpTarget | null {
+  return (
+    targets.find((target) => {
+      if (
+        target.type !== "page" ||
+        target.webSocketDebuggerUrl === undefined ||
+        !isLoopbackCdpWebSocketUrl(target.webSocketDebuggerUrl)
+      ) {
+        return false;
+      }
+      try {
+        const url = new URL(target.url);
+        return (
+          url.protocol === "https:" &&
+          url.hostname === "tilda.ru" &&
+          url.pathname === "/projects/" &&
+          !url.searchParams.has("projectid") &&
+          !url.searchParams.has("projectId")
         );
       } catch {
         return false;

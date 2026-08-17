@@ -1,37 +1,43 @@
 # Roadmap
 
-## Phase 1 — evidence and safe primitives
+## Phase 1 — evidence-first research primitives
 
-- [x] CDP target discovery and status probe.
-- [x] Fail-closed configuration and exact page ownership gates.
-- [x] Sanitized, loopback-only Observatory.
-- [x] Public-safe OSS staging package.
-- [ ] Publish a sanitized compatibility fixture format.
-- [ ] Reproduce a standard-block read contract in an isolated lab.
-- [ ] Reproduce one minimal standard-block patch and verified restore.
-- [ ] Reproduce T123 read/patch/restore.
-- [ ] Reproduce Zero Block read/no-op/leaf-patch/restore.
-- [ ] Establish cross-restart and editor-fingerprint canaries.
+- [x] CDP target discovery, inventory normalization, hashing, and status.
+- [x] Fail-closed target and source-corpus policy primitives.
+- [x] Loopback-only sanitized observability.
+- [x] Public-safe OSS packaging and privacy scan rules.
 
-## Phase 2 — stable control plane
+## Phase 2 — verified vertical slice
 
-- [ ] Version adapter contracts and structured ChangeSets.
-- [ ] Add an immutable local ledger for historical source-project denylisting.
-- [ ] Implement capability-level policy and approval receipts.
-- [ ] Add automated semantic and visual verification.
-- [ ] Detect editor drift and quarantine affected adapters.
+- [x] Typed adapter contracts and an append-only ChangeSet engine.
+- [x] Same-session browser authority with exact target gates.
+- [x] Standard, T123, narrow Zero, and page SEO adapters.
+- [x] Page-specific HEAD read and reversible replacement inside the existing
+  eleven-tool ChangeSet surface, with publication unchanged.
+- [x] Separate publication controller and public verifier.
+- [x] Fixed page-lifecycle transaction with restoration checks.
+- [x] Private isolated-lab live round-trips, source-target rejection, and
+  dedicated-browser restart/rebind verification.
+- [x] Public `0.2.0-prealpha` candidate with sanitized code/tests/docs.
 
-## Phase 3 — MCP pre-release
+## Phase 3 — public pre-release
 
-- [ ] Define narrow, evidence-backed MCP tool schemas.
-- [ ] Ship read-only inspection tools first.
-- [ ] Add reversible write tools only after public lab evidence.
-- [ ] Publish end-to-end evals and compatibility reports.
-- [ ] Record a 60-120 second verified vertical-slice demo.
+- [ ] Add a documented, user-owned local ledger workflow without shipping
+  account-specific fixtures.
+- [ ] Publish sanitized compatibility fixture and editor-drift canary formats.
+- [ ] Add more Standard families, Zero element families, and page settings only
+  after separate reversible lab evidence.
+- [ ] Research site-wide HEAD separately; do not generalize the page-specific
+  route/runtime contract.
+- [ ] Compare normal mode with Tilda Advanced Interface Mode and fail closed on
+  inventory, pagination, sorting, or DOM-shape drift.
+- [ ] Produce a reproducible public demo with synthetic or user-supplied lab
+  data and explicit approval gates.
+- [ ] Gather external users/contributors before making broader adoption claims.
 
-## Open-source programs
+## Explicitly out of scope for this pre-alpha
 
-- [ ] Create a clean public repository after final human privacy review.
-- [ ] Apply to the standalone Codex Open Source Fund only if its form remains active and the public repository is credible.
-- [ ] Re-evaluate Codex for Open Source after a working public release and initial adoption signals.
-- [ ] Submit to the OpenAI Developer Showcase after a public, reproducible demo exists and the current submission flow is reverified.
+Production guarantees, universal Tilda coverage, arbitrary undocumented writes,
+official editor-write API claims, assets/catalog/forms, cross-project moves,
+trash recovery, site-wide HEAD, Advanced Interface Mode compatibility, and
+automatic publication.

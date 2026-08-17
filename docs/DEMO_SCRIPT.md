@@ -1,29 +1,27 @@
 # Demo script
 
-**Status: planned, not yet recordable as a working demo.**
+**Status: public recording still pending.**
 
-Do not record this as a product demonstration until every operation in the script is implemented, live reproduced in an isolated lab, restored, and represented honestly in `CAPABILITIES.md`.
+The private Phase 2 vertical slice has been verified in an authorized isolated
+lab, but a public demo must use synthetic or user-supplied lab data and must
+not expose the private account evidence.
 
-## Target length
+## Suggested 60–120 second public flow
 
-60-120 seconds.
-
-## Future verified vertical slice
-
-1. User asks Codex to inspect an allowlisted Tilda research page.
-2. Codex calls a read-only MCP inspection tool and shows semantic page/block identity.
-3. Codex presents a structured ChangeSet for one heading and one CTA URL.
-4. The policy engine verifies account binding, complete inventory, exact project/page ownership, and expected revision.
-5. Codex applies one semantic mutation at a time.
-6. The verifier rereads editor state and compares exact structural diffs.
-7. With separate explicit approval, a research page is published and the public state is reread.
-8. The demo ends on the evidence record, not on a save toast.
-
-Zero Block or T123 should appear only after those adapters have independent reversible proofs. Until then, demonstrate the smaller verified slice rather than simulate missing capabilities.
+1. Start the local MCP server and show the eleven tool registrations.
+2. Run the read-only `pnpm smoke:mcp` command.
+3. Show a synthetic target and a dry-run ChangeSet in unit-test fixtures.
+4. Show the structured result contract: exact target, state-change flag,
+   snapshot/ChangeSet references, and an explicit evidence code.
+5. Explain that apply, rollback, publication, and live verification require a
+   fresh operator-owned browser session and a local allowlist.
+6. End on the safety boundary and capability table; do not imply universal or
+   production coverage.
 
 ## Capture rules
 
-- Use a synthetic research page with no client content.
-- Hide account identity, project/page IDs, domains, browser chrome, and auth state.
-- Do not show raw requests, headers, cookies, storage, or source-corpus fixtures.
-- Include the pre-alpha label and the exact capability statuses.
+- Hide account identity, project/page/record/element IDs, domains, browser
+  chrome, credentials, cookies, and auth state.
+- Do not show raw requests, headers, storage, HAR, traces, T123/Zero payloads,
+  client content, Leads, orders, or source-corpus fixtures.
+- Keep the `0.2.0-prealpha` label and exact capability statuses visible.

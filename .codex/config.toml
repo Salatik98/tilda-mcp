@@ -1,0 +1,9 @@
+# Project-scoped MCP entrypoint. Run Codex from the repository root so the
+# local project path and ignored .tilda-runtime state stay together.
+[mcp_servers.tilda_agent_os]
+command = "pnpm"
+args = ["mcp"]
+startup_timeout_sec = 20
+tool_timeout_sec = 180
+default_tools_approval_mode = "writes"
+enabled = true

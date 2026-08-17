@@ -1,6 +1,9 @@
 # Agent entrypoint
 
-This repository is pre-alpha research. Do not claim a production MCP server or a capability that is not listed as verified in `CAPABILITIES.md`.
+This repository is a `0.2.0-prealpha` Phase 2 vertical slice. It contains an
+executable local MCP control plane, but it is not a production or universal
+Tilda MCP. Do not claim a capability beyond `CAPABILITIES.md` or private lab
+evidence explicitly described there.
 
 ## Read first
 
@@ -10,6 +13,9 @@ This repository is pre-alpha research. Do not claim a production MCP server or a
 4. `SECURITY.md`
 5. `CONTRIBUTING.md`
 
+For implementation work, also read `docs/MCP_USAGE.md` and the relevant source
+and unit tests before changing a contract.
+
 ## Non-negotiable rules
 
 - Use only accounts, projects, and pages for which the operator has authorization.
@@ -17,7 +23,9 @@ This repository is pre-alpha research. Do not claim a production MCP server or a
 - Keep checked-in configuration fail-closed.
 - Never commit `.env`, credentials, cookies, browser profiles, storage state, HAR files, traces, private fixtures, Leads, orders, PII, or proprietary content.
 - Editing never implies publication. Publication requires a separate explicit approval and exact target.
-- Undocumented behavior remains experimental until a reversible lab proof is published.
+- Undocumented behavior remains experimental until a reversible lab proof is
+  completed; the public repository must not include the account-specific proof
+  payloads.
 - Do not blind-retry an undocumented write after an ambiguous result.
 
 ## Evidence discipline

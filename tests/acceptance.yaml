@@ -1,40 +1,20 @@
-version: 1
-status: NOT_MET
+version: 2
+status: PARTIAL_PUBLIC_CANDIDATE
 
+# Private lab evidence is summarized without account identifiers or payloads.
+# This file is a claim ledger, not a permission to run remote writes.
 criteria:
-  lab_write_operations:
-    target: 100
-    current: 0
-  fresh_browser_restarts:
-    target: 3
-    current: 0
-  wrong_target_writes:
-    target: 0
-    current: 0
-  successful_writes_with_reread_percent:
-    target: 100
-    current: null
-  implicit_publications:
-    target: 0
-    current: 0
-  unapproved_publications:
-    target: 0
-    current: 0
-  secret_redaction_tests_percent:
-    target: 100
-    current: null
-  p0_live_reproduced:
-    target: true
-    current: false
-  coordinate_free_stable_operations_percent:
-    target: 95
-    current: null
-  stale_revision_protection_demonstrated:
-    target: true
-    current: false
-  reversible_capabilities_with_verified_restore_percent:
-    target: 100
-    current: null
-  fresh_codex_discovery:
-    target: true
-    current: false
+  public_unit_and_security_tests:
+    status: verified
+  public_mcp_stdio_smoke:
+    status: verified
+  private_isolated_lab_vertical_slice:
+    status: verified
+  private_restart_rebind_smoke:
+    status: verified
+  public_replayable_live_fixture:
+    status: intentionally_omitted
+  universal_tilda_coverage:
+    status: not_claimed
+  production_readiness:
+    status: not_claimed
