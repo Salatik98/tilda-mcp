@@ -1,0 +1,35 @@
+{
+  "name": "tilda-mcp",
+  "version": "0.0.0-prealpha.1",
+  "private": false,
+  "description": "Pre-alpha research harness for a safe, machine-verifiable Tilda control plane.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Salatik98/tilda-mcp.git"
+  },
+  "homepage": "https://github.com/Salatik98/tilda-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/Salatik98/tilda-mcp/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:security": "vitest run tests/security",
+    "tilda": "tsx src/research/cli.ts",
+    "observatory": "tsx src/research/server.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,47 @@
+version: 1
+
+defaults:
+  remote_writes: blocked
+  publication: blocked
+  account_level_operations: blocked
+
+risk_classes:
+  READ:
+    lab: auto
+    production: auto
+  SAFE_WRITE:
+    lab: require_bound_allowlist_snapshot_and_dry_run
+    production: explicit_approval
+  STRUCTURAL_WRITE:
+    lab: require_bound_allowlist_snapshot_and_dry_run
+    production: explicit_approval
+  DESTRUCTIVE:
+    lab: explicit_approval
+    production: explicit_approval
+  PUBLISH:
+    lab: explicit_approval
+    production: explicit_approval
+  ACCOUNT_LEVEL:
+    lab: disabled
+    production: disabled
+
+write_preconditions:
+  - authenticated_account_fingerprint_matches
+  - complete_inventory_hash_matches
+  - project_is_exactly_allowlisted_as_lab
+  - page_owner_matches_exact_project_page_tuple
+  - expected_revision_or_hash_matches
+  - snapshot_exists
+  - dry_run_reviewed
+  - one_semantic_mutation_only
+  - reread_diff_and_restore_required
+
+hard_disabled:
+  - project.delete
+  - account.credentials.*
+  - account.billing.*
+  - site.domain.change
+  - dns.*
+  - leads.read
+  - orders.read
+  - member_data.read

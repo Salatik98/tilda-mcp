@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a reproducible bug without private Tilda data.
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not include credentials, cookies, account/project/page IDs, client
+        content, raw HAR files, browser profiles, Leads, orders, or PII.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Sanitized reproduction
+      description: Use synthetic IDs and example.test domains only.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Verification output
+      description: Include only sanitized typecheck/test/build output.

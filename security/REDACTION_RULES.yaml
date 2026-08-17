@@ -1,0 +1,52 @@
+version: 1
+mode: fail_closed
+
+placeholder:
+  format: "[REDACTED:sha256_8=<first-8-hex>:length=<utf8-bytes>]"
+  deterministic: true
+  reversible: false
+
+headers:
+  action: drop
+  case_sensitive: false
+  names:
+    - Cookie
+    - Set-Cookie
+    - Authorization
+    - CSRF
+    - XSRF
+  note: "Derived token and authorization header names are dropped as well."
+
+urls:
+  query_action: redact_value
+  query_key_matching: "case-insensitive; separators ignored"
+  sensitive_keys:
+    - secret
+    - token
+    - password
+    - session
+    - auth
+    - api_key
+    - publickey
+    - secretkey
+    - csrf
+    - cookie
+    - xsrf
+  hosts_with_query_removed:
+    - api.tildacdn.info
+
+bodies:
+  action: recursive_key_redaction
+  pii_keys:
+    - email
+    - phone
+    - name
+    - fio
+    - message
+  opaque_string_action: redact_entire_value
+  malformed_json_action: abort
+
+failure:
+  error_type: SanitizationError
+  code: SANITIZATION_FAILED
+  persistence_allowed: false

@@ -1,0 +1,40 @@
+version: 1
+status: NOT_MET
+
+criteria:
+  lab_write_operations:
+    target: 100
+    current: 0
+  fresh_browser_restarts:
+    target: 3
+    current: 0
+  wrong_target_writes:
+    target: 0
+    current: 0
+  successful_writes_with_reread_percent:
+    target: 100
+    current: null
+  implicit_publications:
+    target: 0
+    current: 0
+  unapproved_publications:
+    target: 0
+    current: 0
+  secret_redaction_tests_percent:
+    target: 100
+    current: null
+  p0_live_reproduced:
+    target: true
+    current: false
+  coordinate_free_stable_operations_percent:
+    target: 95
+    current: null
+  stale_revision_protection_demonstrated:
+    target: true
+    current: false
+  reversible_capabilities_with_verified_restore_percent:
+    target: 100
+    current: null
+  fresh_codex_discovery:
+    target: true
+    current: false

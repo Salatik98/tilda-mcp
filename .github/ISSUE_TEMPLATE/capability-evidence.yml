@@ -1,0 +1,38 @@
+name: Capability evidence
+description: Propose sanitized evidence for an experimental Tilda capability.
+title: "[evidence] "
+labels: [evidence]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Evidence must come from an authorized isolated lab. Never upload private
+        fixtures, real identifiers, page content, credentials, or raw traces.
+  - type: dropdown
+    id: status
+    attributes:
+      label: Proposed evidence status
+      options:
+        - Source observed
+        - Live observed
+        - Live reproduced and restored
+        - Canary verified
+    validations:
+      required: true
+  - type: textarea
+    id: claim
+    attributes:
+      label: Exact claim
+    validations:
+      required: true
+  - type: textarea
+    id: protocol
+    attributes:
+      label: Sanitized protocol and recovery
+    validations:
+      required: true
+  - type: textarea
+    id: hashes
+    attributes:
+      label: Before, after, and restored hashes
+      description: Do not include content or real identifiers.

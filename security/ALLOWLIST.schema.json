@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.tilda-agent-os/security/allowlist.schema.json",
+  "title": "Tilda Agent OS allowlist snapshot",
+  "$comment": "Runtime additionally verifies an HMAC-derived live account fingerprint, exact full-inventory hash, complete current-project classification, page ownership, and disjoint classifications before unblocking any operation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["accountFingerprint", "inventoryHash", "labProjectIds", "readOnlyProjectIds", "labPageTargets"],
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "idList": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+    "fingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "properties": {
+    "accountFingerprint": {
+      "oneOf": [{ "const": "UNSPECIFIED" }, { "$ref": "#/$defs/fingerprint" }]
+    },
+    "inventoryHash": {
+      "oneOf": [{ "const": "UNSPECIFIED" }, { "type": "string", "pattern": "^[a-f0-9]{64}$" }]
+    },
+    "labProjectIds": {
+      "oneOf": [{ "const": "UNSPECIFIED" }, { "$ref": "#/$defs/idList" }]
+    },
+    "readOnlyProjectIds": {
+      "oneOf": [{ "const": "UNSPECIFIED" }, { "$ref": "#/$defs/idList" }]
+    },
+    "labPageTargets": {
+      "oneOf": [
+        { "const": "UNSPECIFIED" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["projectId", "pageId"],
+            "properties": {
+              "projectId": { "$ref": "#/$defs/id" },
+              "pageId": { "$ref": "#/$defs/id" }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "labProjectIds": { "type": "array" } }, "required": ["labProjectIds"] },
+      "then": {
+        "properties": {
+          "accountFingerprint": { "$ref": "#/$defs/fingerprint" },
+          "inventoryHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "readOnlyProjectIds": { "$ref": "#/$defs/idList" }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+version: 1
+
+canaries:
+  - id: C00
+    mode: safe
+    check: cdp_connection_and_authenticated_session
+    on_failure: block_all_browser_capabilities
+  - id: C01
+    mode: safe
+    check: editor_fingerprint
+    on_failure: run_affected_read_probes_and_block_writes
+  - id: C02
+    mode: safe
+    check: official_api_inventory_if_configured
+    on_failure: degrade_official_api_adapter_only
+  - id: C03
+    mode: safe
+    check: page_identity
+    on_failure: block_all_writes
+  - id: C04
+    mode: safe
+    check: record_identity_and_type
+    on_failure: block_block_level_writes
+  - id: C05
+    mode: safe
+    check: standard_settings_read
+    on_failure: quarantine_standard_adapter
+  - id: C06
+    mode: safe
+    check: t123_read
+    on_failure: quarantine_t123_adapter
+  - id: C07
+    mode: safe
+    check: zero_model_read
+    on_failure: quarantine_zero_adapter
+  - id: C08
+    mode: full_lab
+    check: zero_noop_roundtrip
+    on_failure: disable_zero_writes
+  - id: C09
+    mode: full_lab
+    check: standard_field_patch_and_restore
+    on_failure: disable_standard_writes
+  - id: C10
+    mode: full_lab
+    check: explicit_publish_verify_restore
+    on_failure: disable_programmatic_publish
