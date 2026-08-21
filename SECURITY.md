@@ -1,24 +1,47 @@
 # Security policy
 
-## Supported versions
+## Supported release
 
-No stable release is supported yet. The repository is pre-alpha research and must not be used as a production control plane.
+`1.0.0` is a public pre-release. It is lab-scoped and must not be treated as
+an official Tilda integration or a production guarantee.
 
 ## Reporting a vulnerability
 
-After the public GitHub repository exists, use GitHub's private vulnerability reporting or a private security advisory. Do not open a public issue containing exploit details, credentials, private Tilda data, or affected account identifiers.
+Use GitHub private vulnerability reporting or a private security advisory. Do
+not publish exploit details, credentials, private Tilda data, or affected
+account identifiers in an issue. If a private channel is unavailable, keep the
+report private until one is available.
 
-Until a private reporting channel is published, keep the report private and do not attach sensitive artifacts to an issue.
+## Data that must never enter the repository
 
-## Sensitive data that must never enter the repository
-
-- passwords, 2FA material, API keys, cookies, auth headers, session or CSRF tokens;
+- passwords, 2FA material, API keys, cookies, auth headers, session or CSRF
+  tokens;
 - browser profiles, storage state, raw HAR files, or unsanitized traces;
 - Leads, orders, member data, customer PII, or proprietary page content;
-- real account, project, page, record, element, or domain identifiers in public fixtures.
+- real account, project, page, record, element, or custom-domain identifiers
+  in public fixtures;
+- screenshots or copied editor payloads that expose private content.
+
+The public package keeps its source-corpus list empty. Each operator must build
+an ignored local inventory and review a disjoint exact allowlist before any
+write is even considered.
 
 ## Operational safety
 
-Use a dedicated browser profile and an isolated lab project. Keep writes fail-closed unless the account, complete inventory, project, page ownership, and expected state are all verified. Publication is always a separate explicit operation.
+Use a dedicated browser profile and a disposable lab project. A fresh account
+and inventory binding, exact target scopes, task authority, expected hash or
+revision, and snapshot are required. Every write follows:
 
-Undocumented adapters must be quarantined on drift, ambiguous results, or failed restoration. Do not blind-retry.
+```text
+read → snapshot → dry-run → one semantic mutation
+→ reread → exact diff → restore/rollback → reread restore
+```
+
+Editing never publishes. Publication and unpublication are separate explicit
+gates. Undocumented adapters are quarantined on drift, ambiguous results, or
+failed restoration; they are never blindly retried. The server rejects remote
+or unclassified targets before dispatch.
+
+See [`security/APPROVAL_POLICY.yaml`](security/APPROVAL_POLICY.yaml) and
+[`security/REDACTION_RULES.yaml`](security/REDACTION_RULES.yaml) for the
+machine-readable policy.

@@ -9,6 +9,7 @@ import type {
 import { TildaEngineError } from "../core/contracts.js";
 import type { AdapterSessionFactory, T123RecordData } from "./session.js";
 import { assertPlainRecord, cloneJson, exactReceipt, state } from "./helpers.js";
+import { planT123CodeEdit } from "./t123-code-helper.js";
 
 interface T123Payload {
   record: Record<string, unknown>;
@@ -55,9 +56,10 @@ export class T123CodeAdapter implements ChangeAdapter {
       throw new TildaEngineError("CAPABILITY_UNSUPPORTED", "T123 adapter cannot plan this request.");
     }
     const prior = payloadOf(before);
+    const edit = planT123CodeEdit(prior.code, request.edit);
     const next = cloneJson(prior);
-    next.code = request.code;
-    next.record.code = request.code;
+    next.code = edit.code;
+    next.record.code = edit.code;
     const intended = state(next, "T123 full code replacement");
     return {
       adapter: this.id,
@@ -68,7 +70,7 @@ export class T123CodeAdapter implements ChangeAdapter {
       expectedAfterHash: intended.hash,
       intendedState: intended,
       changedPaths: ["record.code"],
-      summary: "Replace the full decoded T123 code on an exact lab record.",
+      summary: `Apply a bounded ${edit.kind} edit to the decoded T123 code.`,
     };
   }
 
@@ -85,7 +87,7 @@ export class T123CodeAdapter implements ChangeAdapter {
       if (plan.expectedBeforeRevision !== undefined && fresh.revision !== plan.expectedBeforeRevision) {
         throw new TildaEngineError("STALE_REVISION", "T123 revision changed before dispatch.");
       }
-      exactReceipt(await session.writeT123(request.target, request.code));
+      exactReceipt(await session.writeT123(request.target, payloadOf(plan.intendedState).code));
       return toState(await session.readT123(request.target));
     });
   }

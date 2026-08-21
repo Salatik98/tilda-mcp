@@ -1,8 +1,8 @@
 {
   "name": "tilda-mcp",
-  "version": "0.2.0-prealpha",
+  "version": "1.0.0",
   "private": false,
-  "description": "Pre-alpha MCP control plane for verified, reversible Tilda lab operations.",
+  "description": "Lab-scoped MCP control plane for verified, reversible Tilda operations.",
   "type": "module",
   "engines": {
     "node": ">=20"

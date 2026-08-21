@@ -164,7 +164,17 @@ const INVENTORY_PROBE = String.raw`(() => {
   }
 
   return {
+    host: location.hostname,
     route: location.pathname,
+    authenticated: Array.from(document.querySelectorAll('a[href]')).some((anchor) => {
+      try {
+        const url = new URL(anchor.getAttribute('href'), location.href);
+        return url.origin === location.origin && url.pathname === '/login/exit/';
+      } catch { return false; }
+    }),
+    uiReady: document.readyState === 'complete' && Boolean(
+      document.querySelector('.td-sites-grid, input[type="password"]') || /\/login|\/signin/i.test(location.pathname)
+    ),
     projects: Array.from(result.values()).sort((a, b) => Number(a.id) - Number(b.id))
   };
 })()`;
@@ -701,9 +711,18 @@ export async function inventoryProjects(config: ResearchConfig): Promise<Account
   const connection = await CdpConnection.connect(target.webSocketDebuggerUrl);
   try {
     const result = await connection.evaluate<{
+      host: string;
       route: string;
+      authenticated: boolean;
+      uiReady: boolean;
       projects: ProjectInventoryItem[];
     }>(INVENTORY_PROBE);
+    if (result.host !== "tilda.ru" || result.route !== "/projects/") {
+      throw new Error("Project inventory must originate from the exact same-origin Tilda projects route.");
+    }
+    if (!result.uiReady || !result.authenticated) {
+      throw new Error("Project inventory requires the authenticated rendered Tilda projects UI.");
+    }
     const warnings: string[] = [];
     if (result.projects.length === 0) {
       warnings.push(

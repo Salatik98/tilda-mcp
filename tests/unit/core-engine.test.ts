@@ -15,6 +15,11 @@ import type {
 import { TildaEngineError } from "../../src/core/contracts.js";
 import { TildaChangeSetEngine } from "../../src/core/engine.js";
 import { ChangeSetStore } from "../../src/core/store.js";
+import {
+  TaskAuthorityManager,
+  type MintTaskAuthorityInput,
+} from "../../src/core/task-authority-manager.js";
+import { TaskScopedChangeSetEngine } from "../../src/core/task-authority.js";
 import { VolatileSnapshotVault } from "../../src/core/vault.js";
 
 const target = {
@@ -50,13 +55,16 @@ class AdversarialAdapter implements ChangeAdapter {
   restoreCalls = 0;
   applyMode: "success" | "throw-before" | "throw-after" | "head-ambiguous" = "success";
   restoreMode: "success" | "throw-before" | "throw-after" | "head-ambiguous" = "success";
+  afterRead: (() => void) | undefined;
 
   supports(candidate: ChangeRequest): boolean {
     return candidate.operation === "standard.field.patch";
   }
 
   async read(_target: ExactTarget): Promise<AdapterState> {
-    return structuredClone(this.current);
+    const result = structuredClone(this.current);
+    this.afterRead?.();
+    return result;
   }
 
   plan(before: AdapterState, candidate: ChangeRequest): PlannedMutation {
@@ -168,7 +176,7 @@ describe("TildaChangeSetEngine adversarial recovery", () => {
     expect(adapter.applyCalls).toBe(1);
   });
 
-  it("does not reconcile a HEAD apply ambiguity even if diagnostic state matches", async () => {
+  it("does not reconcile a HEAD apply ambiguity even when the diagnostic hash is expected-after", async () => {
     const planned = await engine.plan(request);
     adapter.applyMode = "head-ambiguous";
 
@@ -243,7 +251,7 @@ describe("TildaChangeSetEngine adversarial recovery", () => {
     expect(engine.vault.has(planned.changeSet.changeSetId)).toBe(false);
   });
 
-  it("does not reconcile a HEAD restore ambiguity even if diagnostic state matches", async () => {
+  it("does not reconcile a HEAD restore ambiguity even when the diagnostic hash is expected-before", async () => {
     const planned = await engine.plan(request);
     await engine.apply(planned.changeSet.changeSetId, false, "apply-before-head-restore-1");
     adapter.restoreMode = "head-ambiguous";
@@ -264,5 +272,107 @@ describe("TildaChangeSetEngine adversarial recovery", () => {
     });
     expect(failed.state).not.toBe("ROLLED_BACK");
     expect(adapter.restoreCalls).toBe(1);
+  });
+
+  it("persists task authority provenance and includes it in idempotency identity", async () => {
+    const firstAuthority = {
+      taskId: "018f0000-0000-7000-8000-000000000001",
+      grantHash: `sha256:${"a".repeat(64)}`,
+    };
+    const secondAuthority = {
+      taskId: "018f0000-0000-7000-8000-000000000002",
+      grantHash: `sha256:${"b".repeat(64)}`,
+    };
+    const planned = await engine.plan(request, {
+      idempotencyKey: "plan-task-authority-1",
+      taskAuthority: firstAuthority,
+    });
+
+    expect(planned.changeSet.taskAuthority).toEqual(firstAuthority);
+    expect(store.loadChangeSet(planned.changeSet.changeSetId).taskAuthority).toEqual(firstAuthority);
+    await expect(engine.plan(request, {
+      idempotencyKey: "plan-task-authority-1",
+      taskAuthority: secondAuthority,
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+  });
+
+  it("keeps actual apply and rollback read/dispatch phases under one task lineage", async () => {
+    let nextId = 1;
+    const authority = new TaskAuthorityManager({
+      now: () => new Date("2026-08-20T04:00:00.000Z"),
+      createTaskId: () =>
+        `018f0000-0000-7000-8000-${String(nextId++).padStart(12, "0")}`,
+    });
+    const binding = {
+      accountFingerprint: "a".repeat(64),
+      inventoryHash: "b".repeat(64),
+    };
+    const authorityInput: MintTaskAuthorityInput = {
+      taskDescription: "Apply and rollback one exact core ChangeSet",
+      mode: "production",
+      observeTargets: [],
+      writeTargets: [{ kind: "page", projectId: target.projectId, pageId: target.pageId }],
+      allowedOperations: ["standard.field.patch"],
+      binding,
+      ttlMs: 60_000,
+    };
+    const initial = authority.mint(authorityInput);
+    const planned = await engine.plan(request, {
+      taskAuthority: { taskId: initial.taskId, grantHash: initial.grantHash },
+    });
+    const scoped = new TaskScopedChangeSetEngine(engine, authority.requireGuard());
+    const transitionErrors: unknown[] = [];
+    let phase: "apply" | "rollback" = "apply";
+    const observedPhases: string[] = [];
+    const attemptedPhases = new Set<string>();
+    adapter.afterRead = () => {
+      observedPhases.push(`${phase}:read`);
+      expect(authority.currentReceipt()).toEqual(initial);
+      if (attemptedPhases.has(phase)) return;
+      attemptedPhases.add(phase);
+      try {
+        authority.replace({ ...authorityInput, taskDescription: "replacement task" });
+      } catch (error) {
+        transitionErrors.push(error);
+      }
+      try {
+        authority.clear();
+      } catch (error) {
+        transitionErrors.push(error);
+      }
+      expect(authority.currentReceipt()).toEqual(initial);
+    };
+
+    await expect(scoped.apply(
+      planned.changeSet.changeSetId,
+      false,
+      "scoped-apply-1",
+    )).resolves.toMatchObject({ changeSet: { state: "APPLIED" } });
+    observedPhases.push("apply:dispatched");
+    phase = "rollback";
+    await expect(scoped.rollback(
+      planned.changeSet.changeSetId,
+      false,
+      "scoped-rollback-1",
+    )).resolves.toMatchObject({ changeSet: { state: "ROLLED_BACK" } });
+    observedPhases.push("rollback:dispatched");
+
+    expect(observedPhases).toEqual([
+      "apply:read",
+      "apply:dispatched",
+      "rollback:read",
+      "rollback:read",
+      "rollback:dispatched",
+    ]);
+    expect(transitionErrors).toHaveLength(4);
+    for (const error of transitionErrors) {
+      expect(error).toMatchObject({ code: "TASK_AUTHORITY_EXECUTION_IN_PROGRESS" });
+    }
+    expect(authority.currentReceipt()).toEqual(initial);
+    expect(adapter.applyCalls).toBe(1);
+    expect(adapter.restoreCalls).toBe(1);
+    expect(authority.replace({ ...authorityInput, taskDescription: "replacement task" })).toMatchObject({
+      taskId: "018f0000-0000-7000-8000-000000000002",
+    });
   });
 });

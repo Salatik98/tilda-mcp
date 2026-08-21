@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.tilda-agent-os/security/task-authority.schema.json",
+  "title": "Tilda MCP task-scoped authority grant",
+  "$comment": "The raw user instruction and all credentials/content are excluded. Runtime additionally checks timestamp order, fresh binding equality, source/write disjointness, scope containment, and typed operation membership.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "taskId", "mode", "instructionHash", "issuedAt", "expiresAt", "accountBinding", "observeTargets", "writeTargets", "allowedOperations"],
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "canonicalHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "target": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "projectId"], "properties": { "kind": { "const": "project" }, "projectId": { "$ref": "#/$defs/id" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "projectId", "pageId"], "properties": { "kind": { "const": "page" }, "projectId": { "$ref": "#/$defs/id" }, "pageId": { "$ref": "#/$defs/id" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "projectId", "pageId", "recordId"], "properties": { "kind": { "const": "record" }, "projectId": { "$ref": "#/$defs/id" }, "pageId": { "$ref": "#/$defs/id" }, "recordId": { "$ref": "#/$defs/id" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "projectId", "pageId", "recordId", "elementId"], "properties": { "kind": { "const": "element" }, "projectId": { "$ref": "#/$defs/id" }, "pageId": { "$ref": "#/$defs/id" }, "recordId": { "$ref": "#/$defs/id" }, "elementId": { "$ref": "#/$defs/id" } } }
+      ]
+    },
+    "targets": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/target" } },
+    "pageTarget": { "type": "object", "additionalProperties": false, "required": ["kind", "projectId", "pageId"], "properties": { "kind": { "const": "page" }, "projectId": { "$ref": "#/$defs/id" }, "pageId": { "$ref": "#/$defs/id" } } },
+    "operation": { "enum": ["standard.field.patch", "t123.code.replace", "zero.leaf.patch", "zero.responsive.patch", "zero.shape.clone", "zero.property.patch", "zero.element.clone", "page.seo.patch", "page.head.code.replace", "standard.template.add", "page.reference.clone", "page.reference.cleanup", "page.lifecycle"] }
+  },
+  "properties": {
+    "format": { "const": "tilda-mcp-task-authority-v1" },
+    "taskId": { "type": "string", "format": "uuid" },
+    "mode": { "enum": ["observe", "copy-test", "production"] },
+    "instructionHash": { "$ref": "#/$defs/canonicalHash" },
+    "issuedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "accountBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accountFingerprint", "inventoryHash"],
+      "properties": { "accountFingerprint": { "$ref": "#/$defs/hash" }, "inventoryHash": { "$ref": "#/$defs/hash" } }
+    },
+    "observeTargets": { "$ref": "#/$defs/targets" },
+    "writeTargets": { "$ref": "#/$defs/targets" },
+    "allowedOperations": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/operation" } },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actions", "targets"],
+      "properties": {
+        "actions": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["publish", "unpublish"] } },
+        "targets": { "type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/pageTarget" } }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "observe" } }, "required": ["mode"] },
+      "then": {
+        "properties": {
+          "observeTargets": { "minItems": 1 },
+          "writeTargets": { "maxItems": 0 },
+          "allowedOperations": { "maxItems": 0 }
+        },
+        "not": { "required": ["publication"] }
+      }
+    },
+    {
+      "if": { "properties": { "mode": { "const": "copy-test" } }, "required": ["mode"] },
+      "then": { "properties": { "observeTargets": { "minItems": 1 }, "writeTargets": { "minItems": 1 } } }
+    },
+    {
+      "if": { "properties": { "mode": { "const": "production" } }, "required": ["mode"] },
+      "then": { "properties": { "writeTargets": { "minItems": 1 } } }
+    }
+  ]
+}

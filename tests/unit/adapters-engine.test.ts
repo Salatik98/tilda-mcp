@@ -93,7 +93,7 @@ class FakeSession implements BoundAdapterSession {
   async readStandard(): Promise<StandardRecordData> {
     return structuredClone(this.standard);
   }
-  async writeStandard(_target: RecordTarget, field: "title" | "buttontitle", value: string) {
+  async writeStandard(_target: RecordTarget, field: string, value: string) {
     this.writeCount += 1;
     this.standard = { ...this.standard, record: { ...this.standard.record, [field]: value } };
     return receipt();
@@ -178,7 +178,7 @@ describe("Phase 2 adapters and ChangeSet engine", () => {
     expect(session.standard.record).toMatchObject({ title: "baseline", unknown: { keep: true } });
   });
 
-  it("rejects an unproved Standard family/field pair", async () => {
+  it("rejects an absent Standard field even when the identity is exact", async () => {
     const session = new FakeSession();
     const adapter = new StandardFieldAdapter(factory(session));
     const before = await adapter.read(recordTarget);
@@ -188,14 +188,66 @@ describe("Phase 2 adapters and ChangeSet engine", () => {
       expectedIdentity: { recordType: "128", recordCode: "TL04" },
       field: "buttontitle",
       value: "no",
-    })).toThrow(/not proven/u);
+    })).toThrow(/absent/u);
+  });
+
+  it("patches an exact own top-level string field on a generic standard family", async () => {
+    const session = new FakeSession();
+    session.standard = {
+      record: {
+        id: recordTarget.recordId,
+        headline: "before",
+        image: "https://example.test/a.jpg",
+        nested: { keep: true },
+      },
+      recordType: "702",
+      recordCode: "BF502N",
+    };
+    const adapter = new StandardFieldAdapter(factory(session));
+    const before = await adapter.read(recordTarget);
+    const plan = adapter.plan(before, {
+      operation: "standard.field.patch",
+      target: recordTarget,
+      expectedIdentity: { recordType: "702", recordCode: "BF502N" },
+      field: "headline",
+      value: "after",
+    });
+    expect(plan.changedPaths).toEqual(["record.headline"]);
+    expect((await adapter.apply(plan)).hash).toBe(plan.expectedAfterHash);
+    expect(session.standard.record).toMatchObject({
+      headline: "after",
+      image: "https://example.test/a.jpg",
+      nested: { keep: true },
+    });
+    expect((await adapter.restore(recordTarget, before)).hash).toBe(before.hash);
+  });
+
+  it("fails closed when the requested standard field is rendered ambiguously", async () => {
+    const session = new FakeSession();
+    session.standard = {
+      ...session.standard,
+      ambiguousFields: ["title"],
+    };
+    const adapter = new StandardFieldAdapter(factory(session));
+    const before = await adapter.read(recordTarget);
+    expect(() => adapter.plan(before, {
+      operation: "standard.field.patch",
+      target: recordTarget,
+      expectedIdentity: { recordType: "128", recordCode: "TL04" },
+      field: "title",
+      value: "blocked",
+    })).toThrow(/ambiguous/u);
   });
 
   it("replaces and exactly restores full T123 code", async () => {
     const session = new FakeSession();
     const adapter = new T123CodeAdapter(factory(session));
     const before = await adapter.read(recordTarget);
-    const plan = adapter.plan(before, { operation: "t123.code.replace", target: recordTarget, code: "<div>x</div>" });
+    const plan = adapter.plan(before, {
+      operation: "t123.code.replace",
+      target: recordTarget,
+      edit: { kind: "full_replace", code: "<div>x</div>" },
+    });
     expect((await adapter.apply(plan)).hash).toBe(plan.expectedAfterHash);
     expect((await adapter.restore(recordTarget, before)).hash).toBe(before.hash);
   });
@@ -264,6 +316,79 @@ describe("Phase 2 adapters and ChangeSet engine", () => {
     expect(JSON.stringify(stringGeometryClone.intendedState.payload)).toContain('"top":"26"');
   });
 
+  it("patches an existing primitive property and clones supported basic Zero elements", async () => {
+    const session = new FakeSession();
+    const imageTarget: ElementTarget = { ...textTarget, elementId: "2001" };
+    session.zero = {
+      ...session.zero,
+      model: {
+        ...session.zero.model as Record<string, unknown>,
+        "2": {
+          elem_id: imageTarget.elementId,
+          type: "image",
+          src: "https://example.test/a.jpg",
+          left: 30,
+          top: 40,
+          zindex: 4,
+          unknown: { keep: true },
+        },
+      },
+    };
+    const adapter = new ZeroModelAdapter(factory(session));
+    const before = await adapter.read(imageTarget);
+    const patch = adapter.plan(before, {
+      operation: "zero.property.patch",
+      target: imageTarget,
+      expectedElementType: "image",
+      property: "src",
+      expectedPrimitiveKind: "string",
+      value: "https://example.test/b.jpg",
+    });
+    expect(patch.changedPaths).toEqual(["2001.src"]);
+    expect((await adapter.apply(patch)).hash).toBe(patch.expectedAfterHash);
+    expect(JSON.stringify(session.zero.model)).toContain('"unknown":{"keep":true}');
+
+    const afterPatch = await adapter.read(imageTarget);
+    const clone = adapter.plan(afterPatch, {
+      operation: "zero.element.clone",
+      target: imageTarget,
+      expectedElementType: "image",
+      offset: { left: 5, top: 6 },
+    });
+    expect(clone.changedPaths[0]).toMatch(/^elements\.\+\d+$/u);
+    expect(JSON.stringify(clone.intendedState.payload)).toContain('"src":"https://example.test/b.jpg"');
+  });
+
+  it("rejects nested creation, primitive-kind drift, and element identity properties", async () => {
+    const session = new FakeSession();
+    const adapter = new ZeroModelAdapter(factory(session));
+    const before = await adapter.read(textTarget);
+    expect(() => adapter.plan(before, {
+      operation: "zero.property.patch",
+      target: textTarget,
+      expectedElementType: "text",
+      property: "missing",
+      expectedPrimitiveKind: "string",
+      value: "x",
+    })).toThrow(/existing own primitive/u);
+    expect(() => adapter.plan(before, {
+      operation: "zero.property.patch",
+      target: textTarget,
+      expectedElementType: "text",
+      property: "link",
+      expectedPrimitiveKind: "string",
+      value: 1,
+    })).toThrow(/primitive kind/u);
+    expect(() => adapter.plan(before, {
+      operation: "zero.property.patch",
+      target: textTarget,
+      expectedElementType: "text",
+      property: "elem_id",
+      expectedPrimitiveKind: "string",
+      value: "9999",
+    })).toThrow(/non-identity/u);
+  });
+
   it("preserves unknown page form fields across SEO patch and restore", async () => {
     const session = new FakeSession();
     const adapter = new PageSettingsAdapter(factory(session));
@@ -274,7 +399,7 @@ describe("Phase 2 adapters and ChangeSet engine", () => {
     expect(session.settings.fields).toEqual([["meta_descr", ""], ["unknown", "keep"]]);
   });
 
-  it("replaces complete page-specific HEAD code and restores it through the engine", async () => {
+  it("replaces the complete page-specific HEAD code and restores it through the engine", async () => {
     const session = new FakeSession();
     const adapter = new PageHeadCodeAdapter(factory(session));
     const before = await adapter.read(pageTarget);
@@ -295,7 +420,6 @@ describe("Phase 2 adapters and ChangeSet engine", () => {
       code: "<meta name=\"baseline\">",
     })).toThrow(/already matches/u);
 
-    mkdirSync(resolve(process.cwd(), ".tilda-runtime"), { recursive: true });
     const root = mkdtempSync(resolve(process.cwd(), ".tilda-runtime", "head-engine-test-"));
     temporaryRoots.push(root);
     const engine = new TildaChangeSetEngine(

@@ -14,6 +14,7 @@ import { resolve } from "node:path";
 
 import type {
   ChangeSetRecord,
+  ChangeSetTaskAuthority,
   ExactTarget,
   SnapshotEnvelope,
 } from "../../src/core/contracts.js";
@@ -33,6 +34,7 @@ const target: ExactTarget = {
 type RecordOptions = {
   changeSetId?: string;
   updatedAt?: string;
+  taskAuthority?: ChangeSetTaskAuthority;
 };
 
 const beforeHash = `sha256:${"1".repeat(64)}`;
@@ -57,6 +59,9 @@ function changeSet(options: RecordOptions = {}): ChangeSetRecord {
     expectedAfterHash: afterHash,
     changedPaths: ["/value"],
     summary: "unit-test changeset",
+    ...(options.taskAuthority === undefined
+      ? {}
+      : { taskAuthority: structuredClone(options.taskAuthority) }),
   };
   return record;
 }
@@ -195,6 +200,31 @@ describe("ChangeSetStore", () => {
       () => store.appendChangeSet(invalidTransition),
       "INVALID_STATE_TRANSITION",
     );
+  });
+
+  it("validates and preserves immutable task authority provenance", () => {
+    const taskAuthority = {
+      taskId: "018f0000-0000-7000-8000-000000000001",
+      grantHash: `sha256:${"a".repeat(64)}`,
+    };
+    const first = store.createChangeSet(changeSet({ taskAuthority }));
+    expect(store.loadChangeSet(first.changeSetId).taskAuthority).toEqual(taskAuthority);
+
+    expectEngineCode(() => store.appendChangeSet({
+      ...first,
+      taskAuthority: {
+        ...taskAuthority,
+        grantHash: `sha256:${"b".repeat(64)}`,
+      },
+      updatedAt: "2026-08-17T00:00:01.000Z",
+    }), "JOURNAL_IMMUTABLE_FIELD_CHANGED");
+
+    expectEngineCode(() => store.createChangeSet(changeSet({
+      taskAuthority: {
+        taskId: "not-a-task-id",
+        grantHash: taskAuthority.grantHash,
+      },
+    })), "STATE_CORRUPT");
   });
 
   it("detects an event-sequence gap without overwriting the unexpected file", () => {

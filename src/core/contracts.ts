@@ -4,8 +4,14 @@ export const CHANGE_OPERATIONS = [
   "zero.leaf.patch",
   "zero.responsive.patch",
   "zero.shape.clone",
+  "zero.property.patch",
+  "zero.element.clone",
   "page.seo.patch",
   "page.head.code.replace",
+  "standard.template.add",
+  "page.reference.clone",
+  "page.reference.cleanup",
+  "page.lifecycle",
 ] as const;
 
 export type ChangeOperation = (typeof CHANGE_OPERATIONS)[number];
@@ -52,17 +58,29 @@ export interface StandardFieldPatch {
   operation: "standard.field.patch";
   target: RecordTarget;
   expectedIdentity: {
-    recordType: "128" | "778";
-    recordCode: "TL04" | "ST310N";
+    recordType: string;
+    recordCode: string;
   };
-  field: "title" | "buttontitle";
+  /** Exact existing own top-level string field from a fresh standard read. */
+  field: string;
   value: string;
 }
+
+export interface T123LiteralReplacement {
+  readonly match: string;
+  readonly replacement: string;
+  readonly expectedMatches: number;
+}
+
+export type T123CodeEditRequest =
+  | { readonly kind: "full_replace"; readonly code: string }
+  | { readonly kind: "replace_once"; readonly match: string; readonly replacement: string }
+  | { readonly kind: "replace_literals"; readonly replacements: readonly T123LiteralReplacement[] };
 
 export interface T123CodeReplace {
   operation: "t123.code.replace";
   target: RecordTarget;
-  code: string;
+  edit: T123CodeEditRequest;
 }
 
 export interface ZeroLeafPatch {
@@ -85,6 +103,26 @@ export interface ZeroShapeClone {
   offset: { left: number; top: number };
 }
 
+export type BasicZeroElementType = "text" | "image" | "shape" | "button" | "html";
+export type ZeroPrimitiveKind = "string" | "number" | "boolean" | "null";
+export type ZeroPrimitiveValue = string | number | boolean | null;
+
+export interface ZeroPropertyPatch {
+  operation: "zero.property.patch";
+  target: ElementTarget;
+  expectedElementType: BasicZeroElementType;
+  property: string;
+  expectedPrimitiveKind: ZeroPrimitiveKind;
+  value: ZeroPrimitiveValue;
+}
+
+export interface ZeroElementClone {
+  operation: "zero.element.clone";
+  target: ElementTarget;
+  expectedElementType: BasicZeroElementType;
+  offset: { left: number; top: number };
+}
+
 export interface PageSeoPatch {
   operation: "page.seo.patch";
   target: PageTarget;
@@ -104,6 +142,8 @@ export type ChangeRequest =
   | ZeroLeafPatch
   | ZeroResponsivePatch
   | ZeroShapeClone
+  | ZeroPropertyPatch
+  | ZeroElementClone
   | PageSeoPatch
   | PageHeadCodeReplace;
 
@@ -157,6 +197,12 @@ export interface VerificationRecord {
   changedPaths?: readonly string[];
 }
 
+/** Content-free provenance binding a plan to one exact ephemeral task grant. */
+export interface ChangeSetTaskAuthority {
+  taskId: string;
+  grantHash: string;
+}
+
 export interface ChangeSetRecord {
   format: "tilda-mcp-changeset-v1";
   changeSetId: string;
@@ -174,6 +220,7 @@ export interface ChangeSetRecord {
   expectedAfterHash: string;
   changedPaths: readonly string[];
   summary: string;
+  taskAuthority?: ChangeSetTaskAuthority;
   /** Digest only. Raw idempotency keys must never enter the journal. */
   planIdempotencyHash?: string;
   appliedHash?: string;

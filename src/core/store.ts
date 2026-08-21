@@ -29,6 +29,7 @@ import {
 } from "./contracts.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const TASK_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EVENT = /^([0-9]{6})\.json$/;
 const CANONICAL_HASH = /^sha256:[a-f0-9]{64}$/;
 const HEX_HASH = /^[a-f0-9]{64}$/;
@@ -259,6 +260,24 @@ function assertVerification(record: ChangeSetRecord): void {
   }
 }
 
+function assertTaskAuthority(record: ChangeSetRecord): void {
+  const authority = record.taskAuthority;
+  if (authority === undefined) return;
+  if (
+    authority === null ||
+    typeof authority !== "object" ||
+    Array.isArray(authority) ||
+    !isDeepStrictEqual(Object.keys(authority).sort(), ["grantHash", "taskId"]) ||
+    !TASK_UUID.test(authority.taskId) ||
+    !CANONICAL_HASH.test(authority.grantHash)
+  ) {
+    throw new TildaEngineError(
+      "STATE_CORRUPT",
+      "ChangeSet task authority provenance is invalid.",
+    );
+  }
+}
+
 function assertChangeSet(record: ChangeSetRecord): void {
   if (record.format !== "tilda-mcp-changeset-v1") {
     throw new TildaEngineError("STATE_CORRUPT", "Unsupported ChangeSet journal format.");
@@ -297,6 +316,7 @@ function assertChangeSet(record: ChangeSetRecord): void {
     throw new TildaEngineError("STATE_CORRUPT", "ChangeSet changedPaths contains duplicates.");
   }
   assertSummary(record.summary, "summary");
+  assertTaskAuthority(record);
   if (record.planIdempotencyHash !== undefined) {
     assertHexHash(record.planIdempotencyHash, "planIdempotencyHash");
   }
@@ -347,6 +367,7 @@ function immutableChangeSetFields(record: ChangeSetRecord): unknown {
     expectedAfterHash: record.expectedAfterHash,
     changedPaths: record.changedPaths,
     summary: record.summary,
+    taskAuthority: record.taskAuthority,
     planIdempotencyHash: record.planIdempotencyHash,
   };
 }

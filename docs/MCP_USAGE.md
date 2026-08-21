@@ -1,95 +1,115 @@
-# MCP usage
+# Tilda MCP usage
 
 ## Connection
 
-This repository contains the `0.2.0-prealpha` MCP control plane. The project
-configuration is [`.codex/config.toml`](../.codex/config.toml). Start it from
-the repository root with:
+The repository contains the `tilda-agent-os` **1.0.0** MCP control plane. A
+trusted Codex project can load `.codex/config.toml`; use `/mcp` to confirm the
+connection. The server can also be started manually:
 
 ```powershell
 pnpm mcp
 ```
 
-Stdout is reserved for MCP JSON-RPC. Diagnostics go to stderr. The public
-checkout has no account-specific allowlist, so all live operations remain
-blocked until an operator supplies and reviews a local authorized lab setup.
+The project configuration asks for one approval on
+`tilda_authorize_task`. The MCP then enforces its own exact task scopes, fresh
+binding, operation list, TTL, and publication gate; it does not ask once per
+block inside the same bounded task. Stdout is reserved for JSON-RPC and
+diagnostics go to stderr.
 
-## Eleven tools
+## Fourteen semantic tools
 
 | Tool | Purpose | Default |
 |---|---|---|
-| `tilda_status` | Read local browser, account, and safety status | read |
-| `tilda_capabilities` | Read capability/transport status | read |
-| `tilda_query` | Read an exact target or local ChangeSet/snapshot | read |
+| `tilda_status` | Read browser, account, and safety status | read |
+| `tilda_capabilities` | Report executable capabilities and evidence gates | read |
+| `tilda_authorize_task` | Grant one bounded task authority | approval |
+| `tilda_audit` | Read identity, structure, and capability gates | read |
+| `tilda_learn_capability` | Plan or run typed copy-test learning | dry-run |
+| `tilda_query` | Read inventory, exact targets, or local journal state | read |
 | `tilda_plan_changeset` | Snapshot and plan one typed mutation | dry-run |
-| `tilda_apply_changeset` | Apply one reviewed ChangeSet | dry-run |
-| `tilda_verify_changeset` | Reread and compare a ChangeSet | read |
-| `tilda_rollback_changeset` | Restore a stored snapshot | dry-run |
-| `tilda_publish` | Request separate exact-page publication | dry-run |
-| `tilda_unpublish` | Request separate exact-page unpublication | dry-run |
-| `tilda_verify_live` | Cache-busted public verification | read |
-| `tilda_page_lifecycle` | Fixed duplicate/parity/reorder/restore/cleanup transaction | dry-run |
+| `tilda_apply_changeset` | Apply one planned ChangeSet | dry-run |
+| `tilda_verify_changeset` | Reread and compare the planned state | read |
+| `tilda_rollback_changeset` | Restore the stored snapshot | dry-run |
+| `tilda_publish` | Separate exact-page publication | dry-run |
+| `tilda_unpublish` | Separate exact-page unpublication | dry-run |
+| `tilda_verify_live` | Cache-busted public read and bounded checks | read |
+| `tilda_page_lifecycle` | Fixed copy/template/lifecycle/cleanup recipes | dry-run |
 
-The names are stable protocol contracts; availability still requires a fresh
-same-session authority, exact local project/page/record ownership, and the
-adapter's evidence gate.
+## One task authority
 
-## Typed mutation scope
+Call `tilda_authorize_task` once at the beginning of a bounded task. It binds
+the user intent digest, fresh account/inventory digests, exact observe and
+write targets, allowed semantic operations, optional publication actions, a
+task ID, and a short TTL.
 
-The Phase 2 vertical slice contains narrow contracts for:
+- `observe`: inventory, exact queries, and audits only;
+- `copy-test`: protected source reads plus writes to an exact disposable copy
+  or lab target; learning is restricted to this mode;
+- `production`: an exact user-authorized writable target with the same
+  snapshot, hash, reread, rollback, and publication gates.
 
-- `standard.field.patch`;
-- `t123.code.replace`;
-- `zero.leaf.patch`, `zero.responsive.patch`, and `zero.shape.clone`;
-- `page.seo.patch`;
-- `page.head.code.replace` — full page-specific HEAD replacement with
-  publication state included in the intended hash.
+The grant is not wildcard account permission. Account switch, browser restart,
+expiry, revocation, target mismatch, or operation mismatch fails closed.
 
-Use `tilda_query` with `kind: "page_head_code"` and an exact page target for
-the companion read. The raw code is omitted by default; `includePayload: true`
-is bounded and should be used only for an exact authorized operation. Neither
-the read nor the replacement publishes the page.
+## Discovery and exact reads
 
-Unknown fields are preserved. Payloads are omitted from MCP results by default
-and are bounded when explicitly requested. These operations do not represent a
-universal Tilda schema.
+Use `tilda_query` with:
+
+- `inventory` for the bounded account/project inventory;
+- `page_inventory` with an exact project ID;
+- `project`, `page`, `record`, or `element` for exact targets;
+- `page_head_code` for the page-specific HEAD read;
+- `record_control` with `controlKey: "contentButton"` for a hover-only record
+  control.
+
+The public package ships no account-specific IDs. A deployment must build and
+review its own ignored inventory and exact allowlist first. Payloads are omitted
+by default and bounded when explicitly requested.
+
+## Supported ChangeSets
+
+| Operation | v1 boundary |
+|---|---|
+| `standard.field.patch` | Existing discovered top-level string field; identity, routing, ordering, and control fields rejected |
+| `t123.code.replace` | Full replacement, one replacement, or bounded literal batch with expected-match counts |
+| `zero.property.patch` | One existing primitive property on an exact supported element |
+| `zero.element.clone` | Clone one valid exact element with a bounded offset |
+| `zero.leaf.patch`, `zero.responsive.patch`, `zero.shape.clone` | Narrow reproduced Zero transitions |
+| `page.seo.patch` | Exact `meta_descr` page-setting field |
+| `page.head.code.replace` | Exact page-specific HEAD contract; site-wide HEAD excluded |
+| `standard.template.add` | Only the reproduced template recipe set |
+| `page.reference.clone`, `page.reference.cleanup` | Same-project copy and adapter-owned cleanup |
+| `page.lifecycle` | Fixed duplicate/parity/reorder/restore/cleanup transaction |
+
+Unknown fields are preserved. T123 and Zero requests are typed and bounded;
+arbitrary raw HTML, groups, molecules, identity fields, or undocumented
+requests are rejected.
 
 ## Safe lifecycle
 
 ```text
-query → plan (dry-run) → apply (explicit dryRun=false)
-      → verify reread → rollback (explicit dryRun=false)
-      → verify restored
+authorize task → query/audit → plan (dry-run)
+→ apply (explicit dryRun=false) → verify reread
+→ rollback (explicit dryRun=false) → verify restored
 ```
 
-The engine records a content-free snapshot and append-only journal, checks the
-expected revision/hash, and requires idempotency keys for remote mutation
-steps. A failed or ambiguous write is quarantined and must not be blindly
-retried. For HEAD writes, two unstable rereads are explicitly
-non-reconcilable: the engine records `APPLY_AMBIGUOUS` or
-`ROLLBACK_AMBIGUOUS`, performs no automatic restore/retry, and requires a new
-bounded diagnosis. Source projects are rejected before snapshot or dispatch.
+The engine records a content-free snapshot and ChangeSet journal, checks the
+expected state hash/revision, and requires an idempotency key for apply and
+rollback. A failed or ambiguous write is quarantined; do not blindly retry.
 
-Publication and unpublication are never edit side effects. They have separate
-approval, idempotency, exact-page, editor-reread, and public-verification gates.
+Publication and unpublication never happen as an edit side effect. They use a
+separate exact page grant and idempotency journal. `tilda_verify_live` is only
+available when a local page-to-public-domain binding is configured.
 
-## Public read-only smoke
+## Public smoke and scope limits
 
 ```powershell
 pnpm smoke:mcp
 ```
 
-This smoke checks the MCP handshake, all eleven tool registrations, structured
-capabilities, and structured status. It uses no live target IDs, no private
-fixtures, no account credentials, and no remote writes. Maintainer-only live
-lab smoke procedures are intentionally kept outside this public package.
-
-## Current scope
-
-This is a verified lab vertical slice, not production automation. It does not
-claim arbitrary records/elements, all Zero families, every page setting,
-cross-project moves, trash recovery, assets, catalog/forms, custom domains, or
-an official editor-write API. Page-specific HEAD is in scope; site-wide HEAD
-and Advanced Interface Mode compatibility remain Phase 3. See
-[`../CAPABILITIES.md`](../CAPABILITIES.md) and
-[`../ARCHITECTURE.md`](../ARCHITECTURE.md).
+The smoke is read-only, requires no login, uses no live target IDs, and checks
+the fourteen registered tools. The package does not claim assets, catalog/form
+operations, arbitrary nested Standard/raw HTML, arbitrary Zero groups,
+cross-project moves, folders/trash restore, generic delete/blank-page creation,
+site-wide HEAD, arbitrary custom-domain checks, full Advanced Mode support, or
+automatic publication.

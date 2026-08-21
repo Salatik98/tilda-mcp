@@ -1,11 +1,14 @@
-version: 2
-status: PARTIAL_PUBLIC_CANDIDATE
+version: 3
+status: PUBLIC_PRE_RELEASE
 
 # Private lab evidence is summarized without account identifiers or payloads.
 # This file is a claim ledger, not a permission to run remote writes.
 criteria:
   public_unit_and_security_tests:
     status: verified
+  public_mcp_tool_surface:
+    status: verified
+    detail: exactly 14 bounded semantic tools
   public_mcp_stdio_smoke:
     status: verified
   private_isolated_lab_vertical_slice:

@@ -7,6 +7,7 @@ import type {
   ChangeAdapter,
   ChangeRequest,
   ChangeSetRecord,
+  ChangeSetTaskAuthority,
   ExactTarget,
   VerificationRecord,
 } from "./contracts.js";
@@ -26,6 +27,13 @@ function now(): string {
 
 function requestHash(request: ChangeRequest): string {
   return canonicalHash(request);
+}
+
+function sameTaskAuthority(
+  left: ChangeSetTaskAuthority | undefined,
+  right: ChangeSetTaskAuthority | undefined,
+): boolean {
+  return left?.taskId === right?.taskId && left?.grantHash === right?.grantHash;
 }
 
 function assertStateHash(state: AdapterState, field: string): void {
@@ -103,13 +111,16 @@ export class TildaChangeSetEngine {
 
   async plan(
     request: ChangeRequest,
-    options: { idempotencyKey?: string } = {},
+    options: { idempotencyKey?: string; taskAuthority?: ChangeSetTaskAuthority } = {},
   ): Promise<EngineActionResult> {
     return this.store.withMutationLock(async () => {
       if (options.idempotencyKey !== undefined) {
         const existing = this.store.findByIdempotencyKey(options.idempotencyKey);
         if (existing !== null) {
-          if (existing.requestHash !== requestHash(request)) {
+          if (
+            existing.requestHash !== requestHash(request) ||
+            !sameTaskAuthority(existing.taskAuthority, options.taskAuthority)
+          ) {
             throw new TildaEngineError(
               "IDEMPOTENCY_CONFLICT",
               "The idempotency key belongs to a different semantic request.",
@@ -174,6 +185,9 @@ export class TildaChangeSetEngine {
           expectedAfterHash: plan.expectedAfterHash,
           changedPaths: [...plan.changedPaths],
           summary: plan.summary,
+          ...(options.taskAuthority === undefined
+            ? {}
+            : { taskAuthority: structuredClone(options.taskAuthority) }),
         };
         const persisted = this.store.createChangeSet(changeSet, options.idempotencyKey);
         return { changeSet: persisted, stateChanged: false, dryRun: true };

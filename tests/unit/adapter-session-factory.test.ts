@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { AuthorityBoundAdapterSession } from "../../src/control/adapter-session-factory.js";
+import {
+  AuthorityBoundAdapterSession,
+  LoopbackAdapterSessionFactory,
+} from "../../src/control/adapter-session-factory.js";
+import { TaskAuthorityManager } from "../../src/core/task-authority-manager.js";
 import type {
   FixedDispatchReceipt,
   LoopbackBrowserAuthority,
@@ -47,7 +51,7 @@ function authority(): LoopbackBrowserAuthority {
         recordCategory: "12",
       }],
       changed: "1",
-      published: "7001",
+      published: "synthetic-published",
       editorLoadedAnchor: true,
       scriptPaths: [],
     })),
@@ -98,9 +102,15 @@ function authority(): LoopbackBrowserAuthority {
       saveFunctionHash: "f".repeat(64),
     })),
     writePageHeadCode: vi.fn(async (_target, _code, _expectedCurrentCode) => receipt()),
+    revealExactRecordControl: vi.fn(),
+    readRenderedBlockLibrary: vi.fn(),
+    preflightKnownTemplateAdd: vi.fn(),
     publishPage: vi.fn(async () => receipt()),
     unpublishPage: vi.fn(async () => receipt()),
     runFixedPageLifecycle: vi.fn(),
+    createPageFromReference: vi.fn(),
+    cleanupReferencePage: vi.fn(),
+    addKnownTemplate: vi.fn(),
   };
   return {
     metadata: {
@@ -122,6 +132,86 @@ function authority(): LoopbackBrowserAuthority {
 }
 
 describe("authority-bound adapter session", () => {
+  it("fails closed before browser acquisition when its configured task manager has no guard", async () => {
+    const factory = new LoopbackAdapterSessionFactory(
+      {} as never,
+      new TaskAuthorityManager(),
+    );
+    await expect(factory.withSession(async () => undefined)).rejects.toMatchObject({
+      code: "TASK_AUTHORITY_REQUIRED",
+    });
+  });
+
+  it("exposes read-only library discovery and non-dispatching known-template preflight", async () => {
+    const browserAuthority = authority();
+    vi.mocked(browserAuthority.adapter.readRenderedBlockLibrary).mockResolvedValue({
+      target: LAB_PAGE,
+      categories: ["Форма", "Попап"],
+      templates: [
+        { templateId: "702", code: "BF502N", category: "Форма" },
+        { templateId: "999", code: "PO999", category: "Попап" },
+      ],
+      mutationIssued: false,
+    });
+    vi.mocked(browserAuthority.adapter.preflightKnownTemplateAdd).mockResolvedValue({
+      target: LAB_PAGE,
+      templateId: "128",
+      runtimeFunction: "tp__addRecord",
+      runtimeFunctionHash: "19510095bc198f51ed297e2ba02291d9e6d3ebc72da7b0724886af7ff60ae5cc",
+      ready: true,
+      mutationIssued: false,
+      evidence: "LIVE_OBSERVED_PREFLIGHT_ONLY",
+    });
+    const session = new AuthorityBoundAdapterSession(browserAuthority);
+    const library = await session.inspectBlockLibrary(PAGE);
+    expect(library.mutationIssued).toBe(false);
+    expect(library.templates).toContainEqual(
+      expect.objectContaining({ templateId: "702", code: "BF502N" }),
+    );
+    await expect(session.preflightKnownTemplateAdd(PAGE, "128")).resolves.toMatchObject({
+      ready: true,
+      mutationIssued: false,
+    });
+    expect(browserAuthority.adapter.writeStandard).not.toHaveBeenCalled();
+  });
+
+  it("inspects a generic standard family and discovers exact string fields", async () => {
+    const browserAuthority = authority();
+    vi.mocked(browserAuthority.adapter.readStandardSettings).mockResolvedValue({
+      target: LAB_RECORD,
+      identity: {
+        recordId: LAB_RECORD.recordId,
+        recordType: "702",
+        recordCode: "BF502N",
+        recordCategory: "10",
+      },
+      status: 200,
+      contentType: "text/html; charset=utf-8",
+      payload: {
+        record: {
+          id: LAB_RECORD.recordId,
+          pageid: LAB_RECORD.pageId,
+          formactiontype: "0",
+          unknown: { preserve: true },
+        },
+        tpl: {},
+      },
+      renderedFields: [
+        { name: "title", value: "Rendered title", representation: "rendered_inner_html" },
+      ],
+    });
+    const session = new AuthorityBoundAdapterSession(browserAuthority);
+    await expect(session.inspectStandard(STANDARD_RECORD)).resolves.toMatchObject({
+      recordType: "702",
+      recordCode: "BF502N",
+      record: { title: "Rendered title", unknown: { preserve: true } },
+      inspection: { patchMechanism: "saverecord_onlythisfield" },
+    });
+    expect((await session.inspectStandard(STANDARD_RECORD)).inspection.fields)
+      .toContainEqual(expect.objectContaining({ name: "title", writable: true }));
+    expect(browserAuthority.adapter.writeStandard).not.toHaveBeenCalled();
+  });
+
   it("merges the exact rendered Standard field into the settings snapshot", async () => {
     const browserAuthority = authority();
     vi.mocked(browserAuthority.adapter.readStandardSettings).mockResolvedValue({
@@ -256,7 +346,7 @@ describe("authority-bound adapter session", () => {
         ["unknown", "preserve"],
       ],
       changed: "1",
-      published: "7001",
+      published: "synthetic-published",
     });
     const readSettings = vi.mocked(browserAuthority.adapter.readPageSettings);
     const readEditor = vi.mocked(browserAuthority.adapter.readEditorPage);
@@ -273,18 +363,16 @@ describe("authority-bound adapter session", () => {
     expect(browserAuthority.adapter.writePageSettings).toHaveBeenCalledWith(LAB_PAGE, intended);
   });
 
-  it("maps the exact page HEAD read/write seam and keeps full code adapter-private", async () => {
+  it("maps the exact page HEAD read/write seam and keeps the full code adapter-private", async () => {
     const browserAuthority = authority();
     const session = new AuthorityBoundAdapterSession(browserAuthority);
     await expect(session.readPageHeadCode(PAGE)).resolves.toEqual({
       code: "<meta name=\"baseline\">",
       changed: "1",
-      published: "7001",
+      published: "synthetic-published",
     });
     const replacement = "<meta name=\"replacement\"><script>void 0;</script>";
-    await expect(
-      session.writePageHeadCode(PAGE, replacement, "<meta name=\"baseline\">"),
-    ).resolves.toEqual({
+    await expect(session.writePageHeadCode(PAGE, replacement, "<meta name=\"baseline\">")).resolves.toEqual({
       operationId: "operation-1",
       requestDispatched: true,
       acknowledgement: "acknowledged",
@@ -301,11 +389,11 @@ describe("authority-bound adapter session", () => {
 
   it("binds publication state to pagepublished and the exact editor revision", async () => {
     const browserAuthority = authority();
-    const session = new AuthorityBoundAdapterSession(browserAuthority, "example.test");
+    const session = new AuthorityBoundAdapterSession(browserAuthority, "example.tilda.ws");
     await expect(session.readPublication(PAGE)).resolves.toMatchObject({
-      published: "7001",
+      published: "synthetic-published",
       pageUrl: `https://tilda.ru/page/?pageid=${PAGE.pageId}&projectid=${PAGE.projectId}`,
-      publicUrl: "https://example.test/",
+      publicUrl: "https://example.tilda.ws/",
     });
     const state = await session.readPublication(PAGE);
     expect(state.changed).toBe("1");

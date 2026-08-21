@@ -1,42 +1,91 @@
-version: 1
+version: 2
 
 defaults:
   remote_writes: blocked
   publication: blocked
   account_level_operations: blocked
 
+task_scoped_authority:
+  schema: TASK_AUTHORITY.schema.json
+  modes:
+    observe:
+      remote_reads: exact_observe_targets_only
+      remote_writes: disabled
+      publication: disabled
+    copy-test:
+      remote_reads: exact_observe_and_write_targets
+      remote_writes: exact_disjoint_copy_targets_and_typed_operations_only
+      source_writeback: disabled
+      publication: only_when_exact_action_and_page_are_in_task_grant
+    production:
+      remote_reads: exact_task_targets
+      remote_writes: exact_task_targets_and_typed_operations
+      publication: only_when_exact_action_and_page_are_in_task_grant
+  binding:
+    - canonical_instruction_digest_without_raw_instruction
+    - task_id_and_expiry
+    - fresh_hmac_account_fingerprint
+    - fresh_complete_inventory_hash
+  invariants:
+    - one_task_grant_covers_its_bounded_plan_apply_verify_and_rollback_lifecycle
+    - no_repeated_per_block_approval_inside_the_granted_scope
+    - exact_leaf_target_required_even_when_an_ancestor_scope_authorizes_it
+    - observe_and_write_scopes_must_be_disjoint
+    - snapshot_dry_run_hash_idempotency_reread_and_restore_are_not_bypassed
+    - editing_never_implies_publication
+    - raw_instruction_credentials_content_and_browser_state_are_not_persisted
+    - account_or_inventory_change_invalidates_the_grant
+
 risk_classes:
   READ:
     lab: auto
+    production: auto_inside_active_task_scope
+  LOCAL_STATE:
+    lab: auto
     production: auto
   SAFE_WRITE:
-    lab: require_bound_allowlist_snapshot_and_dry_run
-    production: explicit_approval
+    lab: auto_after_dry_run_and_allowlist
+    production: auto_after_task_grant_snapshot_and_dry_run
   STRUCTURAL_WRITE:
-    lab: require_bound_allowlist_snapshot_and_dry_run
-    production: explicit_approval
+    lab: auto_after_snapshot_and_allowlist
+    production: auto_after_task_grant_snapshot_and_exact_target
   DESTRUCTIVE:
     lab: explicit_approval
-    production: explicit_approval
+    production: exact_task_grant_and_transaction_owned_cleanup_only
+  ROLLBACK_CLEANUP:
+    lab: auto_after_same_experiment_receipt_and_reread
+    production: auto_inside_same_task_snapshot_and_exact_reread
   PUBLISH:
     lab: explicit_approval
-    production: explicit_approval
+    production: auto_only_when_exact_action_and_page_are_in_task_grant
   ACCOUNT_LEVEL:
     lab: disabled
     production: disabled
 
-write_preconditions:
-  - authenticated_account_fingerprint_matches
-  - complete_inventory_hash_matches
-  - project_is_exactly_allowlisted_as_lab
-  - page_owner_matches_exact_project_page_tuple
+allowlist_invariants:
+  - read_only_project_ids_required_before_lab_writes
+  - lab_project_ids_and_read_only_project_ids_must_be_disjoint
+  - read_only_precedence_blocks_misconfigured_overlap
+  - allowlist_bound_to_live_account_fingerprint_and_inventory_hash
+  - complete_current_project_inventory_required
+  - every_current_project_must_be_classified_read_only_or_lab
+  - every_configured_lab_project_must_be_present_in_current_inventory
+  - page_id_has_exactly_one_project_owner_in_live_inventory
+  - page_scoped_write_requires_exact_project_page_tuple
+  - existing_record_write_requires_exact_project_page_record_triple
+
+global_write_preconditions:
+  - exact_target_verified
+  - target_authorized_by_active_task_grant
   - expected_revision_or_hash_matches
+  - adapter_evidence_sufficient_for_environment
   - snapshot_exists
   - dry_run_reviewed
   - one_semantic_mutation_only
   - reread_diff_and_restore_required
 
-hard_disabled:
+hard_disabled_by_default:
+  - lab.bootstrap.repeat
   - project.delete
   - account.credentials.*
   - account.billing.*

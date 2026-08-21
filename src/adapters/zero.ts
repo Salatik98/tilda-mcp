@@ -6,6 +6,8 @@ import type {
   ExactTarget,
   PlannedMutation,
   ZeroLeafPatch,
+  ZeroElementClone,
+  ZeroPropertyPatch,
   ZeroResponsivePatch,
   ZeroShapeClone,
 } from "../core/contracts.js";
@@ -128,6 +130,33 @@ function assertShape(element: Record<string, unknown>): void {
   }
 }
 
+const BASIC_ELEMENT_TYPES = new Set(["text", "image", "shape", "button", "html"]);
+const ZERO_PROPERTY = /^[A-Za-z][A-Za-z0-9_:-]{0,127}$/u;
+
+function elementType(element: Record<string, unknown>): string {
+  const value = element.type ?? element.elem_type;
+  return typeof value === "string" ? value : "";
+}
+
+function primitiveKind(value: unknown): "string" | "number" | "boolean" | "null" | null {
+  if (value === null) return "null";
+  if (typeof value === "string" || typeof value === "boolean") {
+    return typeof value as "string" | "boolean";
+  }
+  if (typeof value === "number" && Number.isFinite(value)) return "number";
+  return null;
+}
+
+function assertBasicType(element: Record<string, unknown>, expectedType: string): void {
+  const actual = elementType(element);
+  if (!BASIC_ELEMENT_TYPES.has(actual) || actual !== expectedType) {
+    throw new TildaEngineError(
+      "ELEMENT_TYPE_MISMATCH",
+      "Zero element is not the expected supported basic type.",
+    );
+  }
+}
+
 function nextElementId(model: unknown): string {
   const ids = new Set(elementObjects(model).map((element) => String(element.elem_id)));
   for (let offset = 0; offset < 100; offset += 1) {
@@ -159,13 +188,41 @@ function appendClone(
   record[cloneKey] = clone;
 }
 
-function planZero(before: AdapterState, request: ZeroLeafPatch | ZeroResponsivePatch | ZeroShapeClone): PlannedMutation {
+function planZero(
+  before: AdapterState,
+  request: ZeroLeafPatch | ZeroResponsivePatch | ZeroShapeClone | ZeroPropertyPatch | ZeroElementClone,
+): PlannedMutation {
   const prior = payloadOf(before);
   const model = cloneJson(prior.model);
   keyedModel(model);
   const element = exactElement(model, request.target.elementId);
   const changedPaths: string[] = [];
-  if (request.operation === "zero.leaf.patch") {
+  if (request.operation === "zero.property.patch") {
+    assertBasicType(element, request.expectedElementType);
+    if (
+      !ZERO_PROPERTY.test(request.property) ||
+      ["elem_id", "type", "elem_type"].includes(request.property) ||
+      !Object.hasOwn(element, request.property)
+    ) {
+      throw new TildaEngineError(
+        "FIELD_OUT_OF_SCOPE",
+        "Zero property must be an existing own primitive non-identity field.",
+      );
+    }
+    const currentKind = primitiveKind(element[request.property]);
+    const nextKind = primitiveKind(request.value);
+    if (currentKind === null || currentKind !== request.expectedPrimitiveKind || nextKind !== currentKind) {
+      throw new TildaEngineError(
+        "FIELD_OUT_OF_SCOPE",
+        "Zero property primitive kind does not match the exact current field.",
+      );
+    }
+    if (element[request.property] === request.value) {
+      throw new TildaEngineError("NO_CHANGES", "Requested Zero property already matches live state.");
+    }
+    element[request.property] = request.value;
+    changedPaths.push(`${request.target.elementId}.${request.property}`);
+  } else if (request.operation === "zero.leaf.patch") {
     const type = element.type ?? element.elem_type;
     if (type !== "text") {
       throw new TildaEngineError("ELEMENT_TYPE_MISMATCH", "Zero link v1 supports text elements only.");
@@ -177,7 +234,10 @@ function planZero(before: AdapterState, request: ZeroLeafPatch | ZeroResponsiveP
     element[request.path] = request.value;
     changedPaths.push(`${request.target.elementId}.${request.path}`);
   } else {
-    assertShape(element);
+    const expectedType = request.operation === "zero.shape.clone"
+      ? "shape"
+      : request.expectedElementType;
+    assertBasicType(element, expectedType);
     const clone = cloneJson(element);
     clone.elem_id = nextElementId(model);
     const originalLeft = clone.left;
@@ -212,14 +272,20 @@ function planZero(before: AdapterState, request: ZeroLeafPatch | ZeroResponsiveP
 
 export class ZeroModelAdapter implements ChangeAdapter {
   readonly id = "zero-model-v1";
-  readonly capabilities = ["zero.leaf.patch", "zero.responsive.patch", "zero.shape.clone"] as const;
+  readonly capabilities = [
+    "zero.leaf.patch",
+    "zero.responsive.patch",
+    "zero.shape.clone",
+    "zero.property.patch",
+    "zero.element.clone",
+  ] as const;
 
   constructor(readonly sessions: AdapterSessionFactory) {}
 
   supports(
     request: ChangeRequest,
-  ): request is ZeroLeafPatch | ZeroResponsivePatch | ZeroShapeClone {
-    return request.operation.startsWith("zero.");
+  ): request is ZeroLeafPatch | ZeroResponsivePatch | ZeroShapeClone | ZeroPropertyPatch | ZeroElementClone {
+    return this.capabilities.includes(request.operation as (typeof this.capabilities)[number]);
   }
 
   async read(target: ExactTarget): Promise<AdapterState> {

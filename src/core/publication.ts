@@ -383,17 +383,17 @@ export class PublicPageVerifier {
   constructor(domains: readonly string[]) {
     const normalized = domains.map((domain) => domain.trim().toLowerCase());
     if (
-      normalized.some(
+      (normalized.length > 0 && normalized.some(
         (domain) =>
           domain === "localhost" ||
           isIP(domain) !== 0 ||
           !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/u.test(domain),
-      ) ||
+      )) ||
       new Set(normalized).size !== normalized.length
     ) {
       throw new TildaEngineError(
         "INVALID_PUBLIC_DOMAIN_ALLOWLIST",
-        "Configured public verification domains must be unique exact DNS hostnames.",
+        "Public verification domains must be unique exact DNS hostnames.",
       );
     }
     this.#allowedDomains = new Set(normalized);

@@ -35,7 +35,7 @@ function restored(
     sourceRecordIds: ["9301"],
     sourcePublished: false,
     sourceChanged: "0",
-    temporaryPageId: "9202",
+    temporaryPageId: "9204",
     temporaryPageAbsent: true,
     pageOrderRestored: true,
     sourceUnchanged: true,
@@ -97,7 +97,7 @@ describe("PageLifecycleController", () => {
       restored: restored(),
     });
     await expect(controller.execute({
-      target: { ...source, pageId: "9203" },
+      target: { ...source, pageId: "9205" },
       idempotencyKey: request.idempotencyKey,
       dryRun: false,
     })).rejects.toMatchObject({ code: "LIFECYCLE_TARGET_MISMATCH" });
@@ -131,7 +131,7 @@ describe("PageLifecycleController", () => {
   });
 
   it("rejects retained temporary pages and blocks an ambiguous same-key retry", async () => {
-    const unsafe = restored({ activePageIds: [source.pageId, "9202"] });
+    const unsafe = restored({ activePageIds: [source.pageId, "9204"] });
     const { controller, transaction } = controllerFor({ baseline: baseline(), restored: unsafe });
     const request = {
       target: source,

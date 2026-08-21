@@ -8,6 +8,7 @@ export interface StandardRecordData {
   readonly record: Readonly<Record<string, unknown>>;
   readonly recordType: string;
   readonly recordCode: string;
+  readonly ambiguousFields?: readonly string[];
 }
 
 export interface T123RecordData {
@@ -59,7 +60,7 @@ export interface BoundAdapterSession {
   readStandard(target: RecordTarget): Promise<StandardRecordData>;
   writeStandard(
     target: RecordTarget,
-    field: "title" | "buttontitle",
+    field: string,
     value: string,
   ): Promise<DispatchReceipt>;
   readT123(target: RecordTarget): Promise<T123RecordData>;

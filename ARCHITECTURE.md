@@ -2,96 +2,95 @@
 
 ## Scope
 
-The repository is a `0.2.0-prealpha` control plane, not a production or
-universal Tilda integration. Phase 2 has a privately verified isolated-lab
-vertical slice. The public checkout contains the generic implementation,
-sanitized tests, and safety documentation; private live identifiers and raw
-editor payloads are intentionally omitted.
+Tilda MCP is a local control plane, not a general Tilda API. The public
+checkout contains the reusable implementation and synthetic tests. Account-
+specific inventories, live receipts, raw editor payloads, and private traces
+stay outside the public package.
 
 ## Runtime layers
 
 ```text
 MCP stdio transport
         |
-tool schemas + bounded result contract
+typed tool schemas + bounded result contract
         |
-control engine + policy/capability gates
+task authority + capability gates
         |
-ChangeSet engine ---- publication journal/controller
+ChangeSet engine ---- publication controller
         |
-same-session browser authority (loopback CDP)
+same-session loopback browser authority
         |
-typed adapters: Standard / T123 / Zero / page settings / page HEAD / lifecycle
+typed adapters: Standard / T123 / Zero / page / lifecycle
         |
-Tilda authenticated editor runtime
+authenticated Tilda editor runtime
 ```
 
-### MCP surface
+### MCP transport
 
-`src/mcp/` owns the protocol-independent tool names, input/output schemas,
-bounded payload policy, and stdio server. Every result is structured and carries
-an explicit code, state-change flag, target, and evidence/diagnostic reference.
+`src/mcp/` owns tool names, strict input schemas, bounded result output, and the
+stdio server. Fourteen tools are exposed as semantic operations rather than
+button-level macros. The public smoke exercises only local status and
+capability reads.
 
-### Control and authority
+### Task authority
 
-`src/control/` composes adapters with one exact browser session. It discovers a
-dedicated authenticated Tilda tab, performs a fresh same-session inventory and
-binding, checks the exact project/page/record target, and exposes only fixed
-semantic operations. The authority intentionally does not expose arbitrary CDP
-evaluation, arbitrary navigation, or a general JavaScript escape hatch.
-The page-specific HEAD port requires the exact editor route, current-code
-compare-before-write, bounded full-value handling, and two post-dispatch
-rereads. It has no publication method.
+`src/core/task-authority*.ts` binds one short-lived task to a fresh account and
+inventory digest, exact observe/write targets, allowed operations, and optional
+publication actions. Discovery is read-only and cannot mint authority. Every
+adapter call rechecks target scope and binding freshness.
 
 ### ChangeSets and recovery
 
-`src/core/` stores content-free snapshots and append-only events beneath the
-ignored `.tilda-runtime/` directory. It validates canonical IDs, expected
-revision/hash, idempotency keys, stale events, locks, path containment, and
-symlink boundaries. Apply, verify, and rollback are distinct operations. An
-ambiguous result is journaled and quarantined; the engine never blindly retries.
-The HEAD adapter's unstable reread errors are intentionally not reconciled to
-success even if a later diagnostic hash happens to match, because that would
-erase evidence of a normalization or timing ambiguity.
+`src/core/` stores content-free snapshots and append-only journal events under
+ignored `.tilda-runtime/`. It validates canonical IDs, expected revision/hash,
+idempotency, stale events, locks, path containment, and symlink boundaries.
+Apply, verify, and rollback are distinct operations. Ambiguous writes are
+quarantined; the engine never blindly retries them.
+
+### Browser authority
+
+`src/control/` keeps editor reads and mutations in one authenticated loopback
+CDP session. It rejects remote debugging endpoints, wrong routes, stale account
+bindings, unclassified projects, and targets outside the exact page/record
+allowlist. Hover-only controls are revealed by semantic ownership proof and are
+never activated by screen coordinates.
 
 ### Adapters
 
-`src/adapters/` translates narrow, evidence-backed semantic requests into
-authority-owned browser calls. Unknown fields are preserved. The implemented
-contracts are deliberately small: selected Standard fields, T123 code, a few
-Zero model transitions, one page SEO field, and one fixed page-lifecycle
-transaction. Page-specific HEAD replacement is another typed operation inside
-that same ChangeSet engine. These contracts are not a general Tilda schema;
-site-wide HEAD is a separate, unproven surface.
+`src/adapters/` translates a small set of reproduced semantic requests into
+authority-owned browser calls. Unknown fields are preserved. Standard editing
+is limited to safe discovered top-level string fields; T123 edits are bounded
+full/single/literal replacements; Zero edits are primitive/clone operations
+with protected identity and type fields. Page-specific HEAD is separate from
+site-wide HEAD and never publishes as a side effect.
 
-### Research and observability
+### Discovery and learning
 
-`src/research/` contains CDP discovery, inventory binding, hashing, browser
-session probes, and a loopback-only sanitized Observatory. Sensitive values are
-used transiently for verification or HMAC derivation and are not persisted in
-the public package.
+`src/research/` provides CDP discovery, inventory normalization, hashing, and
+sanitized observability. Capability learning accepts only typed copy-test
+objects and bounded trace/replay/restore evidence. It never accepts arbitrary
+JavaScript, URLs, selectors, or request bodies. A missing, ambiguous, or
+non-restorable capability remains blocked.
 
 ## Evidence promotion
 
-An undocumented behavior moves through explicit evidence states:
+An undocumented behavior moves through explicit states:
 
 1. source-observed hypothesis;
 2. live observation in an authorized session;
 3. reproduced reversible lab operation;
-4. canary/restart verification against the current editor fingerprint;
-5. a narrowly named MCP capability.
+4. restart/editor-drift verification;
+5. narrowly named MCP capability.
 
-The private Phase 2 run reached the last state for the listed vertical-slice
-operations. Public users must reproduce and review their own account-bound
-lab evidence before enabling writes. A class being present in the registry is
-not proof that a remote transport is safe for a different account or editor
-release.
+The public repository does not promote a capability merely because a class or
+schema exists. Users must build their own account-bound allowlist and repeat
+the relevant reversible proof before enabling writes.
 
 ## Deliberate gaps
 
-The public package does not claim arbitrary editor writes, all Standard block
-families, all Zero element types or breakpoints, assets, catalog/forms,
-cross-project moves, trash recovery, a documented Tilda write API, or production
-reliability. Site-wide HEAD and Advanced Interface Mode compatibility are Phase
-3 evidence gates. Editor drift must quarantine an adapter until a fresh lab
-proof is available.
+The v1 boundary excludes assets, catalog/forms, arbitrary nested models or raw
+HTML, arbitrary Zero groups/molecules, cross-project moves, folders/trash
+restore, generic deletion/blank-page creation, site-wide HEAD, arbitrary
+custom-domain verification, full Advanced Mode compatibility, and automatic
+publication. Editor drift must quarantine an adapter until a fresh lab proof is
+available.

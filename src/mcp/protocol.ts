@@ -4,6 +4,9 @@ import type { ChangeSetState, ExactTarget } from "../core/contracts.js";
 export const TILDA_MCP_TOOL_NAMES = [
   "tilda_status",
   "tilda_capabilities",
+  "tilda_authorize_task",
+  "tilda_audit",
+  "tilda_learn_capability",
   "tilda_query",
   "tilda_plan_changeset",
   "tilda_apply_changeset",

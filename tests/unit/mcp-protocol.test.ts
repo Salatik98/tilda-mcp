@@ -6,7 +6,10 @@ import {
 } from "../../src/mcp/protocol.js";
 import {
   applyChangeSetInputSchema,
+  auditInputSchema,
+  authorizeTaskInputSchema,
   changeRequestSchema,
+  learnCapabilityInputSchema,
   normalizeTildaMcpResult,
   pageLifecycleInputSchema,
   planChangeSetInputSchema,
@@ -23,6 +26,9 @@ describe("MCP protocol", () => {
     expect(TILDA_MCP_TOOL_NAMES).toEqual([
       "tilda_status",
       "tilda_capabilities",
+      "tilda_authorize_task",
+      "tilda_audit",
+      "tilda_learn_capability",
       "tilda_query",
       "tilda_plan_changeset",
       "tilda_apply_changeset",
@@ -34,6 +40,8 @@ describe("MCP protocol", () => {
       "tilda_page_lifecycle",
     ]);
     expect(isTildaMcpToolName("tilda_apply_changeset")).toBe(true);
+    expect(isTildaMcpToolName("tilda_authorize_task")).toBe(true);
+    expect(isTildaMcpToolName("tilda_learn_capability")).toBe(true);
     expect(isTildaMcpToolName("save_record")).toBe(false);
   });
 
@@ -60,11 +68,63 @@ describe("MCP protocol", () => {
 
   it("keeps the initialization guidance self-contained for Codex", () => {
     expect(SERVER_INSTRUCTIONS.length).toBeLessThanOrEqual(512);
-    expect(SERVER_INSTRUCTIONS).toContain("source projects are never writable");
-    expect(SERVER_INSTRUCTIONS).toContain("Publish and unpublish are separate");
+    expect(SERVER_INSTRUCTIONS).toContain("observe, copy-test, or production");
+    expect(SERVER_INSTRUCTIONS).toContain("publish and unpublish are separate");
   });
 
-  it("accepts proven strict ChangeRequest forms, including full page HEAD replacement", () => {
+  it("accepts only bounded exact task-authority grants", () => {
+    const page = { kind: "page" as const, projectId: "9101", pageId: "9201" };
+    const production = authorizeTaskInputSchema.parse({
+      taskDescription: "Измени точную страницу, опубликуй и проверь",
+      mode: "production",
+      observeTargets: [],
+      writeTargets: [page],
+      allowedOperations: ["page.seo.patch"],
+      publication: { actions: ["publish"], targets: [page] },
+    });
+    expect(production.ttlMs).toBe(15 * 60_000);
+    expect(authorizeTaskInputSchema.safeParse({
+      ...production,
+      allowedOperations: ["zero.property.patch", "zero.element.clone"],
+    }).success).toBe(true);
+    expect(authorizeTaskInputSchema.safeParse({
+      ...production,
+      mode: "observe",
+    }).success).toBe(false);
+    expect(authorizeTaskInputSchema.safeParse({
+      ...production,
+      allowedOperations: ["page.seo.patch", "page.seo.patch"],
+    }).success).toBe(false);
+    expect(authorizeTaskInputSchema.safeParse({
+      ...production,
+      allowedOperations: ["unknown.operation"],
+    }).success).toBe(false);
+    expect(authorizeTaskInputSchema.safeParse({
+      ...production,
+      ttlMs: 30 * 60_000 + 1,
+    }).success).toBe(false);
+    expect(authorizeTaskInputSchema.safeParse({
+      ...production,
+      taskDescription: "я".repeat(16 * 1_024),
+    }).success).toBe(false);
+    expect(authorizeTaskInputSchema.safeParse({
+      ...production,
+      rawTask: "must not be accepted",
+    }).success).toBe(false);
+    expect(authorizeTaskInputSchema.safeParse({
+      ...production,
+      observeTargets: [{ kind: "project", projectId: page.projectId }],
+    }).success).toBe(false);
+    expect(authorizeTaskInputSchema.safeParse({
+      ...production,
+      publication: {
+        actions: ["publish"],
+        targets: [{ ...page, pageId: "999999999" }],
+      },
+    }).success).toBe(false);
+  });
+
+  it("accepts the proven strict ChangeRequest forms, including full page HEAD replacement", () => {
     const request = changeRequestSchema.parse({
       operation: "standard.field.patch",
       target: {
@@ -83,11 +143,27 @@ describe("MCP protocol", () => {
     expect(changeRequestSchema.safeParse({
       ...request,
       expectedIdentity: { recordType: "778", recordCode: "ST310N" },
+      field: "custom_field:desktop",
+    }).success).toBe(true);
+    expect(changeRequestSchema.safeParse({
+      ...request,
+      expectedIdentity: { recordType: "0", recordCode: "TL04" },
     }).success).toBe(false);
+    expect(changeRequestSchema.safeParse({
+      ...request,
+      expectedIdentity: { recordType: "128", recordCode: "tl04" },
+    }).success).toBe(false);
+    expect(changeRequestSchema.safeParse({ ...request, field: "nested.field" }).success).toBe(false);
+    expect(changeRequestSchema.safeParse({ ...request, field: "id" }).success).toBe(false);
+    expect(changeRequestSchema.safeParse({ ...request, field: "pageid" }).success).toBe(false);
 
     const head = changeRequestSchema.parse({
       operation: "page.head.code.replace",
-      target: { kind: "page", projectId: "9101", pageId: "9201" },
+      target: {
+        kind: "page",
+        projectId: "9101",
+        pageId: "9201",
+      },
       code: "<meta name=\"verified\"><script>void 0;</script>",
     });
     expect(head).toEqual({
@@ -97,13 +173,118 @@ describe("MCP protocol", () => {
     });
     expect(changeRequestSchema.safeParse({
       operation: "page.head.code.replace",
-      target: { kind: "record", projectId: "9101", pageId: "9201", recordId: "9301" },
+      target: {
+        kind: "record",
+        projectId: "9101",
+        pageId: "9201",
+        recordId: "9301",
+      },
       code: "replacement",
     }).success).toBe(false);
     expect(changeRequestSchema.safeParse({
       operation: "page.head.code.replace",
       target: { kind: "page", projectId: "9101", pageId: "9201" },
       code: "replacement",
+      publish: true,
+    }).success).toBe(false);
+  });
+
+  it("keeps generic Zero property patches and clones type-safe and bounded", () => {
+    const target = {
+      kind: "element" as const,
+      projectId: "9101",
+      pageId: "9201",
+      recordId: "9301",
+      elementId: "1700000000001",
+    };
+    expect(changeRequestSchema.parse({
+      operation: "zero.property.patch",
+      target,
+      expectedElementType: "image",
+      property: "src",
+      expectedPrimitiveKind: "string",
+      value: "https://example.invalid/image.webp",
+    })).toMatchObject({ operation: "zero.property.patch", property: "src" });
+    expect(changeRequestSchema.safeParse({
+      operation: "zero.property.patch",
+      target,
+      expectedElementType: "shape",
+      property: "opacity",
+      expectedPrimitiveKind: "number",
+      value: 0.5,
+    }).success).toBe(true);
+    expect(changeRequestSchema.safeParse({
+      operation: "zero.property.patch",
+      target,
+      expectedElementType: "text",
+      property: "hidden",
+      expectedPrimitiveKind: "boolean",
+      value: false,
+    }).success).toBe(true);
+    expect(changeRequestSchema.safeParse({
+      operation: "zero.property.patch",
+      target,
+      expectedElementType: "html",
+      property: "placeholder",
+      expectedPrimitiveKind: "null",
+      value: null,
+    }).success).toBe(true);
+    expect(changeRequestSchema.safeParse({
+      operation: "zero.property.patch",
+      target,
+      expectedElementType: "image",
+      property: "src",
+      expectedPrimitiveKind: "string",
+      value: 1,
+    }).success).toBe(false);
+    expect(changeRequestSchema.safeParse({
+      operation: "zero.property.patch",
+      target,
+      expectedElementType: "video",
+      property: "src",
+      expectedPrimitiveKind: "string",
+      value: "value",
+    }).success).toBe(false);
+    expect(changeRequestSchema.safeParse({
+      operation: "zero.property.patch",
+      target,
+      expectedElementType: "shape",
+      property: "elem_id",
+      expectedPrimitiveKind: "string",
+      value: "1700000000002",
+    }).success).toBe(false);
+    expect(changeRequestSchema.safeParse({
+      operation: "zero.property.patch",
+      target,
+      expectedElementType: "shape",
+      property: "nested.field",
+      expectedPrimitiveKind: "number",
+      value: Number.POSITIVE_INFINITY,
+    }).success).toBe(false);
+
+    expect(changeRequestSchema.safeParse({
+      operation: "zero.element.clone",
+      target,
+      expectedElementType: "button",
+      offset: { left: 24, top: -12 },
+    }).success).toBe(true);
+    expect(changeRequestSchema.safeParse({
+      operation: "zero.element.clone",
+      target,
+      expectedElementType: "video",
+      offset: { left: 24, top: -12 },
+    }).success).toBe(false);
+    expect(changeRequestSchema.safeParse({
+      operation: "zero.element.clone",
+      target,
+      expectedElementType: "button",
+      offset: { left: Number.NaN, top: -12 },
+    }).success).toBe(false);
+    expect(changeRequestSchema.safeParse({
+      operation: "zero.element.clone",
+      target,
+      expectedElementType: "button",
+      offset: { left: 24, top: -12 },
       publish: true,
     }).success).toBe(false);
   });
@@ -160,6 +341,30 @@ describe("MCP protocol", () => {
       },
     }).query;
     expect("includePayload" in recordQuery && recordQuery.includePayload).toBe(false);
+    expect(queryInputSchema.safeParse({
+      query: {
+        kind: "record_control",
+        target: {
+          kind: "record",
+          projectId: "9101",
+          pageId: "9201",
+          recordId: "9301",
+        },
+        controlKey: "contentButton",
+      },
+    }).success).toBe(true);
+    expect(queryInputSchema.safeParse({
+      query: {
+        kind: "record_control",
+        target: {
+          kind: "record",
+          projectId: "9101",
+          pageId: "9201",
+          recordId: "9301",
+        },
+        controlKey: "arbitraryButton",
+      },
+    }).success).toBe(false);
 
     const base = {
       changeSetId: "f72ca258-7a3a-45d0-b4b7-59ae804eb6b8",
@@ -194,8 +399,59 @@ describe("MCP protocol", () => {
     });
   });
 
+  it("keeps audit and capability learning typed and copy-test only", () => {
+    const target = { kind: "record" as const, projectId: "9101", pageId: "9201", recordId: "9301" };
+    const audit = auditInputSchema.parse({ target });
+    expect(audit.checks).toContain("identity");
+    expect(auditInputSchema.safeParse({ target, checks: ["identity", "identity"] }).success).toBe(false);
+
+    const plan = learnCapabilityInputSchema.parse({
+      mode: "copy-test",
+      target,
+      targetRole: "test-object",
+      capability: "standard.block.clone",
+      family: "standard",
+      action: "clone",
+    });
+    expect(plan.dryRun).toBe(true);
+    expect(learnCapabilityInputSchema.safeParse({
+      ...plan,
+      mode: "production",
+    }).success).toBe(false);
+    expect(learnCapabilityInputSchema.safeParse({
+      ...plan,
+      capability: "https://example.test/learn",
+    }).success).toBe(false);
+    expect(learnCapabilityInputSchema.safeParse({
+      ...plan,
+      target: {
+        kind: "element",
+        projectId: "9101",
+        pageId: "9201",
+        recordId: "9305",
+        elementId: "javascript:alert(1)",
+      },
+    }).success).toBe(false);
+    expect(learnCapabilityInputSchema.safeParse({
+      ...plan,
+      script: "globalThis.evil()",
+    }).success).toBe(false);
+    expect(learnCapabilityInputSchema.safeParse({ ...plan, action: "publish" }).success).toBe(false);
+    expect(learnCapabilityInputSchema.safeParse({ ...plan, action: "unpublish" }).success).toBe(false);
+    expect(learnCapabilityInputSchema.safeParse({
+      ...plan,
+      dryRun: false,
+    }).success).toBe(false);
+    expect(learnCapabilityInputSchema.safeParse({
+      ...plan,
+      dryRun: false,
+      idempotencyKey: "learning-copy-test-1",
+    }).success).toBe(true);
+  });
+
   it("accepts only the fixed idempotent page-lifecycle request shape", () => {
     const lifecycle = pageLifecycleInputSchema.parse({
+      action: "fixed_roundtrip",
       target: { kind: "page", projectId: "9101", pageId: "9201" },
       idempotencyKey: "mcp-page-lifecycle-idempotency-1",
     });

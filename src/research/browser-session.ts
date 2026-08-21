@@ -62,6 +62,53 @@ export interface ExactEditorRecordRead {
     readonly value: string;
     readonly representation: "rendered_inner_html" | "absent_empty";
   };
+  /** All unambiguous rendered `[field]` values; read-only unless a recipe promotes one. */
+  readonly renderedFields?: readonly {
+    readonly name: string;
+    readonly value: string;
+    readonly representation: "rendered_inner_html";
+  }[];
+  /** Duplicate rendered field names are never patchable. */
+  readonly ambiguousRenderedFields?: readonly string[];
+}
+
+/**
+ * DOM-only evidence that one hover-revealed control belongs to the exact
+ * editor record. The primitive never clicks the control and never uses screen
+ * coordinates.
+ */
+export interface ExactRecordHoverControlReveal {
+  readonly target: LabRecordTarget;
+  readonly identity: EditorRecordIdentity;
+  readonly controlKey: string;
+  readonly ownerRecordId: string;
+  readonly tagName: string;
+  readonly connected: true;
+}
+
+export interface RenderedBlockLibraryTemplate {
+  readonly templateId: string;
+  readonly code: string;
+  readonly category: string | null;
+}
+
+export interface RenderedBlockLibraryIndex {
+  readonly target: LabPageTarget;
+  readonly categories: readonly string[];
+  readonly templates: readonly RenderedBlockLibraryTemplate[];
+  readonly mutationIssued: false;
+}
+
+export type KnownObservedTemplateId = "128" | "778" | "131" | "396";
+
+export interface KnownTemplateAddPreflight {
+  readonly target: LabPageTarget;
+  readonly templateId: KnownObservedTemplateId;
+  readonly runtimeFunction: "tp__addRecord";
+  readonly runtimeFunctionHash: string;
+  readonly ready: boolean;
+  readonly mutationIssued: false;
+  readonly evidence: "LIVE_OBSERVED_PREFLIGHT_ONLY";
 }
 
 export interface ExactPageSettingsRead {
@@ -105,6 +152,40 @@ export interface FixedPageLifecycleResult {
   };
 }
 
+export interface FixedReferencePageCreateResult {
+  readonly baseline: {
+    readonly target: LabPageTarget;
+    readonly activePageIds: readonly string[];
+    readonly pageOrder: readonly string[];
+    readonly sourceRecords: readonly EditorRecordIdentity[];
+  };
+  readonly created: {
+    readonly target: LabPageTarget;
+    readonly activePageIds: readonly string[];
+    readonly pageOrder: readonly string[];
+    readonly records: readonly EditorRecordIdentity[];
+    readonly published: false;
+  };
+}
+
+export interface FixedReferencePageCleanupResult {
+  readonly sourceTarget: LabPageTarget;
+  readonly removedPageId: string;
+  readonly activePageIds: readonly string[];
+  readonly pageOrder: readonly string[];
+  readonly removedPageAbsent: true;
+  readonly sourceRecords: readonly EditorRecordIdentity[];
+}
+
+export interface FixedKnownTemplateAddResult {
+  readonly target: LabPageTarget;
+  readonly templateId: KnownObservedTemplateId;
+  readonly beforeRecords: readonly EditorRecordIdentity[];
+  readonly afterRecords: readonly EditorRecordIdentity[];
+  readonly createdRecord: EditorRecordIdentity;
+  readonly publishedUnchanged: true;
+}
+
 export function isReadyExactEditorPageSnapshot(probe: ExactEditorPageSnapshot): boolean {
   return (
     probe.uiReady &&
@@ -115,7 +196,7 @@ export function isReadyExactEditorPageSnapshot(probe: ExactEditorPageSnapshot): 
   );
 }
 
-export type StandardWritableField = "title" | "buttontitle";
+export type StandardWritableField = string;
 
 /** Private transport result reduced to an opaque receipt by browser authority. */
 export interface FixedBrowserDispatchResult {
@@ -171,6 +252,21 @@ export interface AuthorityOwnedLoopbackBrowserSession extends TrustedBrowserSess
     target: LabRecordTarget,
     timeoutMs: number,
   ): Promise<ExactEditorRecordRead>;
+  revealExactRecordControl(
+    target: LabRecordTarget,
+    expectedIdentity: EditorRecordIdentity,
+    controlKey: string,
+    timeoutMs: number,
+  ): Promise<ExactRecordHoverControlReveal>;
+  readRenderedBlockLibrary(
+    target: LabPageTarget,
+    timeoutMs: number,
+  ): Promise<RenderedBlockLibraryIndex>;
+  preflightKnownTemplateAdd(
+    target: LabPageTarget,
+    templateId: KnownObservedTemplateId,
+    timeoutMs: number,
+  ): Promise<KnownTemplateAddPreflight>;
   writeStandard(
     target: LabRecordTarget,
     field: StandardWritableField,
@@ -223,6 +319,24 @@ export interface AuthorityOwnedLoopbackBrowserSession extends TrustedBrowserSess
     target: LabPageTarget,
     timeoutMs: number,
   ): Promise<FixedPageLifecycleResult>;
+  createPageFromReference(
+    target: LabPageTarget,
+    timeoutMs: number,
+  ): Promise<FixedReferencePageCreateResult>;
+  cleanupReferencePage(
+    sourceTarget: LabPageTarget,
+    createdPageId: string,
+    expectedActivePageIds: readonly string[],
+    expectedPageOrder: readonly string[],
+    expectedSourceRecords: readonly EditorRecordIdentity[],
+    expectedCreatedRecords: readonly EditorRecordIdentity[],
+    timeoutMs: number,
+  ): Promise<FixedReferencePageCleanupResult>;
+  addKnownTemplate(
+    target: LabPageTarget,
+    templateId: KnownObservedTemplateId,
+    timeoutMs: number,
+  ): Promise<FixedKnownTemplateAddResult>;
 }
 
 function normalizeProbeTimeout(timeoutMs: number): number {
@@ -516,27 +630,44 @@ const EXACT_RECORD_READ_PROBE = String.raw`async (input) => {
     throw new Error("AUTHORITY_RESPONSE_SHAPE_REJECTED");
   }
   let writableField;
+  let renderedFields;
+  let ambiguousRenderedFields;
   if (input.kind === "standard") {
+    const fields = new Map();
+    for (const node of Array.from(record.querySelectorAll("[field]"))) {
+      const name = node.getAttribute("field") || "";
+      if (!/^[A-Za-z][A-Za-z0-9_:-]{0,127}$/.test(name) || !(node instanceof HTMLElement)) continue;
+      if (fields.has(name)) fields.set(name, null);
+      else fields.set(name, node.innerHTML);
+    }
+    renderedFields = Array.from(fields.entries())
+      .filter((entry) => typeof entry[1] === "string")
+      .map(([name, value]) => ({ name, value, representation: "rendered_inner_html" }));
+    ambiguousRenderedFields = Array.from(fields.entries())
+      .filter((entry) => entry[1] === null)
+      .map(([name]) => name)
+      .sort();
     let field;
     if (identity.recordType === "128" && identity.recordCode === "TL04") field = "title";
     else if (identity.recordType === "778" && identity.recordCode === "ST310N") field = "buttontitle";
-    else throw new Error("AUTHORITY_STANDARD_READ_CONTRACT_REJECTED");
-    const nodes = Array.from(record.querySelectorAll('[field="' + field + '"]'));
-    if (nodes.length > 1 || (field === "title" && nodes.length !== 1)) {
-      throw new Error("AUTHORITY_STANDARD_FIELD_AMBIGUOUS");
-    }
-    if (nodes.length === 0) {
-      writableField = { name: field, value: "", representation: "absent_empty" };
-    } else {
-      const fieldNode = nodes[0];
-      if (!(fieldNode instanceof HTMLElement) || typeof fieldNode.innerHTML !== "string") {
-        throw new Error("AUTHORITY_STANDARD_FIELD_SHAPE_REJECTED");
+    if (field !== undefined) {
+      const nodes = Array.from(record.querySelectorAll('[field="' + field + '"]'));
+      if (nodes.length > 1 || (field === "title" && nodes.length !== 1)) {
+        throw new Error("AUTHORITY_STANDARD_FIELD_AMBIGUOUS");
       }
-      writableField = {
-        name: field,
-        value: fieldNode.innerHTML,
-        representation: "rendered_inner_html"
-      };
+      if (nodes.length === 0) {
+        writableField = { name: field, value: "", representation: "absent_empty" };
+      } else {
+        const fieldNode = nodes[0];
+        if (!(fieldNode instanceof HTMLElement) || typeof fieldNode.innerHTML !== "string") {
+          throw new Error("AUTHORITY_STANDARD_FIELD_SHAPE_REJECTED");
+        }
+        writableField = {
+          name: field,
+          value: fieldNode.innerHTML,
+          representation: "rendered_inner_html"
+        };
+      }
     }
   }
   return {
@@ -545,6 +676,8 @@ const EXACT_RECORD_READ_PROBE = String.raw`async (input) => {
     status: response.status,
     contentType: response.headers.get("content-type") || "",
     payload,
+    ...(renderedFields === undefined ? {} : { renderedFields }),
+    ...(ambiguousRenderedFields === undefined ? {} : { ambiguousRenderedFields }),
     ...(writableField === undefined ? {} : { writableField })
   };
 }`;
@@ -577,10 +710,12 @@ const FIXED_RECORD_WRITE_PROBE = String.raw`async (input) => {
   body.set("pageid", input.target.pageId);
   body.set("recordid", input.target.recordId);
   if (input.kind === "standard") {
-    const validIdentity =
-      (input.field === "title" && recordType === "128" && recordCode === "TL04") ||
-      (input.field === "buttontitle" && recordType === "778" && recordCode === "ST310N");
-    if (!validIdentity || typeof input.value !== "string") {
+    if (
+      !/^[A-Za-z][A-Za-z0-9_:-]{0,127}$/.test(input.field) ||
+      recordType === "" ||
+      recordCode === "" ||
+      typeof input.value !== "string"
+    ) {
       throw new Error("AUTHORITY_STANDARD_WRITE_CONTRACT_REJECTED");
     }
     body.set("onlythisfield", input.field);
@@ -701,6 +836,215 @@ const ZERO_OPEN_COMMAND = String.raw`(async input => {
   return { opened: true };
 })`;
 
+const EXACT_RECORD_HOVER_CONTROL_REVEAL_PROBE = String.raw`async input => {
+  const url = new URL(location.href);
+  if (
+    url.origin !== "https://tilda.ru" ||
+    url.pathname !== "/page/" ||
+    Array.from(url.searchParams.keys()).sort().join(",") !== "pageid,projectid" ||
+    url.searchParams.getAll("projectid").length !== 1 ||
+    url.searchParams.get("projectid") !== input.target.projectId ||
+    url.searchParams.getAll("pageid").length !== 1 ||
+    url.searchParams.get("pageid") !== input.target.pageId ||
+    url.hash !== ""
+  ) throw new Error("AUTHORITY_EDITOR_TARGET_MISMATCH");
+  if (!/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(input.controlKey)) {
+    throw new Error("AUTHORITY_RECORD_CONTROL_KEY_REJECTED");
+  }
+  const record = document.getElementById("record" + input.target.recordId) ||
+    document.querySelector('[data-record-id="' + input.target.recordId + '"]') ||
+    document.querySelector('[data-recordid="' + input.target.recordId + '"]');
+  if (!(record instanceof HTMLElement) || !record.isConnected) {
+    throw new Error("AUTHORITY_RECORD_TARGET_MISMATCH");
+  }
+  const attribute = names => {
+    for (const name of names) {
+      const value = record.getAttribute(name);
+      if (value !== null && value !== "") return value;
+    }
+    return "";
+  };
+  const identity = {
+    recordId: input.target.recordId,
+    recordType: attribute(["data-record-type", "data-recordtype"]),
+    recordCode: attribute(["data-record-cod", "data-recordcod"]),
+    recordCategory: attribute(["data-record-category", "data-recordcategory"])
+  };
+  if (
+    identity.recordId !== input.expectedIdentity.recordId ||
+    identity.recordType !== input.expectedIdentity.recordType ||
+    identity.recordCode !== input.expectedIdentity.recordCode ||
+    identity.recordCategory !== input.expectedIdentity.recordCategory
+  ) throw new Error("AUTHORITY_RECORD_IDENTITY_CHANGED");
+  const uiControl = record.uiControl;
+  if (!uiControl || typeof uiControl !== "object") {
+    throw new Error("AUTHORITY_RECORD_UI_CONTROL_MISSING");
+  }
+  const readControl = () => {
+    const elements = uiControl.elements;
+    return elements && Object.hasOwn(elements, input.controlKey)
+      ? elements[input.controlKey]
+      : null;
+  };
+  let control = readControl();
+  if (!(control instanceof HTMLElement) || !control.isConnected) {
+    const pointerEnter = typeof PointerEvent === "function"
+      ? new PointerEvent("pointerenter", { bubbles: false, cancelable: false })
+      : new Event("pointerenter", { bubbles: false, cancelable: false });
+    record.dispatchEvent(pointerEnter);
+    record.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false, cancelable: false }));
+    control = readControl();
+    if (
+      (!(control instanceof HTMLElement) || !control.isConnected) &&
+      typeof uiControl.handlePointerEnter === "function" &&
+      uiControl.handlePointerEnter.length === 0
+    ) {
+      uiControl.handlePointerEnter();
+    }
+    const deadline = Date.now() + Math.min(input.waitMs, 1500);
+    while (Date.now() < deadline) {
+      control = readControl();
+      if (control instanceof HTMLElement && control.isConnected) break;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  }
+  if (!(control instanceof HTMLElement) || !control.isConnected) {
+    throw new Error("AUTHORITY_RECORD_CONTROL_NOT_REVEALED");
+  }
+  const editorRecords = Array.from(document.querySelectorAll('[id^="record"], [data-record-id], [data-recordid]'))
+    .filter(candidate => candidate instanceof HTMLElement);
+  const controllerOwners = editorRecords.filter(candidate => candidate.uiControl === uiControl);
+  const controlOwners = editorRecords.filter(candidate => {
+    const candidateControl = candidate.uiControl;
+    const elements = candidateControl && typeof candidateControl === "object"
+      ? candidateControl.elements : null;
+    return elements && Object.hasOwn(elements, input.controlKey) && elements[input.controlKey] === control;
+  });
+  const closestOwner = control.closest('[data-record-id], [data-recordid], [id^="record"]');
+  if (
+    controllerOwners.length !== 1 || controllerOwners[0] !== record ||
+    controlOwners.length !== 1 || controlOwners[0] !== record ||
+    (closestOwner !== null && closestOwner !== record)
+  ) {
+    throw new Error("AUTHORITY_RECORD_CONTROL_OWNERSHIP_REJECTED");
+  }
+  return {
+    target: input.target,
+    identity,
+    controlKey: input.controlKey,
+    ownerRecordId: input.target.recordId,
+    tagName: control.tagName.toLowerCase(),
+    connected: true
+  };
+}`;
+
+const RENDERED_BLOCK_LIBRARY_READ_PROBE = String.raw`input => {
+  const url = new URL(location.href);
+  if (
+    url.origin !== "https://tilda.ru" ||
+    url.pathname !== "/page/" ||
+    Array.from(url.searchParams.keys()).sort().join(",") !== "pageid,projectid" ||
+    url.searchParams.getAll("projectid").length !== 1 ||
+    url.searchParams.get("projectid") !== input.target.projectId ||
+    url.searchParams.getAll("pageid").length !== 1 ||
+    url.searchParams.get("pageid") !== input.target.pageId ||
+    url.hash !== ""
+  ) throw new Error("AUTHORITY_EDITOR_TARGET_MISMATCH");
+  const attribute = (node, names) => {
+    for (const name of names) {
+      const value = node.getAttribute(name);
+      if (value !== null && value.trim() !== "") return value.trim();
+    }
+    return "";
+  };
+  const candidates = Array.from(document.querySelectorAll(
+    "[data-tplid], [data-tpl-id], [data-template-id]"
+  ));
+  if (candidates.length > 5000) throw new Error("AUTHORITY_BLOCK_LIBRARY_TOO_LARGE");
+  const templates = [];
+  const seen = new Set();
+  for (const node of candidates) {
+    const templateId = attribute(node, ["data-tplid", "data-tpl-id", "data-template-id"]);
+    const code = attribute(node, ["data-record-code", "data-record-cod", "data-code"]);
+    if (!/^[1-9]\d*$/.test(templateId) || !/^[A-Z][A-Z0-9]{1,15}$/.test(code)) continue;
+    const owner = node.closest("[data-category], [data-category-name], [data-block-category]");
+    const category = owner
+      ? attribute(owner, ["data-category", "data-category-name", "data-block-category"])
+      : "";
+    const key = templateId + ":" + code;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    templates.push({ templateId, code, category: category || null });
+  }
+  if (templates.length === 0) {
+    throw new Error("AUTHORITY_BLOCK_LIBRARY_NOT_RENDERED_OR_UNRECOGNIZED");
+  }
+  const categories = Array.from(new Set(templates.map(item => item.category).filter(Boolean))).sort();
+  templates.sort((left, right) => Number(left.templateId) - Number(right.templateId));
+  return { target: input.target, categories, templates, mutationIssued: false };
+}`;
+
+const KNOWN_TEMPLATE_ADD_PREFLIGHT_PROBE = String.raw`async input => {
+  const url = new URL(location.href);
+  if (
+    url.origin !== "https://tilda.ru" ||
+    url.pathname !== "/page/" ||
+    Array.from(url.searchParams.keys()).sort().join(",") !== "pageid,projectid" ||
+    url.searchParams.getAll("projectid").length !== 1 ||
+    url.searchParams.get("projectid") !== input.target.projectId ||
+    url.searchParams.getAll("pageid").length !== 1 ||
+    url.searchParams.get("pageid") !== input.target.pageId ||
+    url.hash !== "" ||
+    !["128", "778", "131", "396"].includes(input.templateId)
+  ) throw new Error("AUTHORITY_KNOWN_TEMPLATE_PREFLIGHT_REJECTED");
+  if (typeof window.tp__addRecord !== "function") {
+    throw new Error("AUTHORITY_ADD_RECORD_RUNTIME_MISSING");
+  }
+  const bytes = new TextEncoder().encode(Function.prototype.toString.call(window.tp__addRecord));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const runtimeFunctionHash = Array.from(new Uint8Array(digest))
+    .map(value => value.toString(16).padStart(2, "0"))
+    .join("");
+  return {
+    target: input.target,
+    templateId: input.templateId,
+    runtimeFunction: "tp__addRecord",
+    runtimeFunctionHash,
+    ready: runtimeFunctionHash === input.expectedRuntimeFunctionHash,
+    mutationIssued: false,
+    evidence: "LIVE_OBSERVED_PREFLIGHT_ONLY"
+  };
+}`;
+
+const FIXED_KNOWN_TEMPLATE_ADD_COMMAND = String.raw`async input => {
+  const url = new URL(location.href);
+  if (
+    url.origin !== "https://tilda.ru" ||
+    url.pathname !== "/page/" ||
+    Array.from(url.searchParams.keys()).sort().join(",") !== "pageid,projectid" ||
+    url.searchParams.get("projectid") !== input.target.projectId ||
+    url.searchParams.get("pageid") !== input.target.pageId ||
+    String(window.projectid ?? "") !== input.target.projectId ||
+    String(window.pageid ?? "") !== input.target.pageId ||
+    !["128", "778", "131", "396"].includes(input.templateId) ||
+    typeof window.tp__addRecord !== "function"
+  ) throw new Error("AUTHORITY_KNOWN_TEMPLATE_ADD_TARGET_REJECTED");
+  const bytes = new TextEncoder().encode(Function.prototype.toString.call(window.tp__addRecord));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const runtimeHash = Array.from(new Uint8Array(digest))
+    .map(value => value.toString(16).padStart(2, "0"))
+    .join("");
+  if (runtimeHash !== input.expectedRuntimeFunctionHash) {
+    throw new Error("AUTHORITY_ADD_RECORD_RUNTIME_CHANGED");
+  }
+  const invocation = input.templateId === "396"
+    ? window.tp__addRecord(input.templateId)
+    : window.tp__addRecord(input.templateId, null, null);
+  await Promise.resolve(invocation);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  return { dispatched: true };
+}`;
+
 const ZERO_RUNTIME_READ_PROBE = String.raw`async (input) => {
   const MAX_RESPONSE_BYTES = 5000000;
   const topUrl = new URL(location.href);
@@ -748,20 +1092,9 @@ const ZERO_RUNTIME_READ_PROBE = String.raw`async (input) => {
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
     return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
   };
-  // These are editor-runtime compatibility fingerprints, not account or
-  // inventory hashes. Keep them split so generic secret scanners do not
-  // mistake a fixed code contract for private binding material.
-  const getterFingerprint = [
-    "4fa5cfe3b0fe1337638cc2d5d0757332",
-    "a336d3b89fbbcabf2b8abbdeaa7c218d",
-  ].join("");
-  const saverFingerprint = [
-    "5b5991469d7cab8e14f8dd7817b8e064",
-    "29dd1605871efd85f02b08dade574c46",
-  ].join("");
   if (
-    await sha256(String(getter)) !== getterFingerprint ||
-    await sha256(String(saver)) !== saverFingerprint
+    await sha256(String(getter)) !== "4fa5cfe3b0fe1337638cc2d5d0757332a336d3b89fbbcabf2b8abbdeaa7c218d" ||
+    await sha256(String(saver)) !== "5b5991469d7cab8e14f8dd7817b8e06429dd1605871efd85f02b08dade574c46"
   ) throw new Error("AUTHORITY_ZERO_RUNTIME_FINGERPRINT_REJECTED");
   const artboards = Array.from(frameDocument.querySelectorAll(".tn-artboard"));
   if (
@@ -929,6 +1262,16 @@ const FIXED_ZERO_WRITE_PROBE = String.raw`async (input) => {
     ? element.elem_id : "";
   const elementType = element => element && typeof element === "object" && !Array.isArray(element)
     ? (element.type ?? element.elem_type) : "";
+  const basicElementTypes = new Set(["text", "image", "shape", "button", "html"]);
+  const primitiveKind = value => {
+    if (value === null) return "null";
+    if (typeof value === "string" || typeof value === "boolean") return typeof value;
+    if (typeof value === "number" && Number.isFinite(value)) return "number";
+    return null;
+  };
+  const canonicalProperty = value =>
+    /^[A-Za-z][A-Za-z0-9_:-]{0,127}$/.test(value) &&
+    !["elem_id", "type", "elem_type"].includes(value);
   const stripCloneFields = element => Object.fromEntries(
     Object.entries(element).filter(([key]) => !["elem_id", "left", "top", "zindex"].includes(key))
   );
@@ -964,7 +1307,20 @@ const FIXED_ZERO_WRITE_PROBE = String.raw`async (input) => {
       const { before, after } = changed[0];
       const keys = Array.from(new Set([...Object.keys(before), ...Object.keys(after)]));
       const changedKeys = keys.filter(key => !jsonEqual(before[key], after[key]));
+      const property = changedKeys[0];
+      const currentType = elementType(before);
+      const genericPrimitivePatch =
+        changedKeys.length === 1 &&
+        typeof property === "string" &&
+        canonicalProperty(property) &&
+        basicElementTypes.has(currentType) &&
+        elementType(after) === currentType &&
+        Object.hasOwn(before, property) &&
+        Object.hasOwn(after, property) &&
+        primitiveKind(before[property]) !== null &&
+        primitiveKind(before[property]) === primitiveKind(after[property]);
       transitionAccepted =
+        genericPrimitivePatch ||
         (changedKeys.length === 1 && changedKeys[0] === "link" &&
           elementType(before) === "text" &&
           (typeof after.link === "string" ||
@@ -988,13 +1344,14 @@ const FIXED_ZERO_WRITE_PROBE = String.raw`async (input) => {
       const sources = currentInfo.elementKeys
         .map(key => current[key])
         .filter(element =>
-          elementType(element) === "shape" &&
+          basicElementTypes.has(elementType(element)) &&
+          elementType(element) === elementType(clone) &&
           jsonEqual(stripCloneFields(element), stripCloneFields(clone))
         );
       transitionAccepted =
         addedKey === expectedKey &&
         allCommonValuesEqual(current, intended, currentInfo.keys) &&
-        elementType(clone) === "shape" &&
+        basicElementTypes.has(elementType(clone)) &&
         isCanonicalElementId(elementId(clone)) &&
         !currentInfo.ids.has(elementId(clone)) &&
         sources.length === 1 &&
@@ -1006,13 +1363,14 @@ const FIXED_ZERO_WRITE_PROBE = String.raw`async (input) => {
       const sources = intendedInfo.elementKeys
         .map(key => intended[key])
         .filter(element =>
-          elementType(element) === "shape" &&
+          basicElementTypes.has(elementType(element)) &&
+          elementType(element) === elementType(removed) &&
           jsonEqual(stripCloneFields(element), stripCloneFields(removed))
         );
       transitionAccepted =
         removedKey === expectedKey &&
         allCommonValuesEqual(intended, current, intendedInfo.keys) &&
-        elementType(removed) === "shape" &&
+        basicElementTypes.has(elementType(removed)) &&
         isCanonicalElementId(elementId(removed)) &&
         !intendedInfo.ids.has(elementId(removed)) &&
         sources.length === 1 &&
@@ -1319,10 +1677,8 @@ const FIXED_PAGE_SETTINGS_WRITE_PROBE = String.raw`async (input) => {
   return { dispatched: true, httpOk: response.ok, status: response.status, responseBytes };
 }`;
 
-const PAGE_HEAD_CODE_SAVE_FUNCTION_HASH = [
-  "e987075affaeb5cfd769eb6ed62e8226c",
-  "f938b372aafb051e0b1031231fafcf9",
-].join("");
+const PAGE_HEAD_CODE_SAVE_FUNCTION_HASH =
+  "e987075affaeb5cfd769eb6ed62e8226cf938b372aafb051e0b1031231fafcf9";
 
 const PAGE_HEAD_CODE_READ_PROBE = String.raw`async (input) => {
   const MAX_RESPONSE_BYTES = 5000000;
@@ -1555,7 +1911,14 @@ const FIXED_PAGE_LIFECYCLE_COMMAND = String.raw`async (input) => {
   }
   const body = new URLSearchParams();
   if (input.action === "duplicate") {
-    if (current.pageOrder.length !== 1 || current.pageOrder[0] !== input.target.pageId) {
+    if (
+      !Array.isArray(input.expectedPageOrder) ||
+      input.expectedPageOrder.length < 1 ||
+      input.expectedPageOrder.some(pageId => !/^[1-9]\d*$/.test(pageId)) ||
+      new Set(input.expectedPageOrder).size !== input.expectedPageOrder.length ||
+      input.expectedPageOrder.join(",") !== current.pageOrder.join(",") ||
+      !current.pageOrder.includes(input.target.pageId)
+    ) {
       throw new Error("AUTHORITY_LIFECYCLE_BASELINE_SCOPE_REJECTED");
     }
     body.append("comm", "dublicatepage");
@@ -1577,9 +1940,10 @@ const FIXED_PAGE_LIFECYCLE_COMMAND = String.raw`async (input) => {
       typeof input.temporaryPageId !== "string" ||
       !/^[1-9]\d*$/.test(input.temporaryPageId) ||
       input.temporaryPageId === input.target.pageId ||
-      current.pageOrder.length !== 2 ||
       !current.pageOrder.includes(input.target.pageId) ||
-      !current.pageOrder.includes(input.temporaryPageId)
+      !current.pageOrder.includes(input.temporaryPageId) ||
+      !Array.isArray(input.expectedPageOrder) ||
+      input.expectedPageOrder.join(",") !== current.pageOrder.join(",")
     ) throw new Error("AUTHORITY_LIFECYCLE_DELETE_REJECTED");
     body.append("comm", "delpage");
     body.append("pageid", input.temporaryPageId);
@@ -1748,6 +2112,63 @@ class LoopbackCdpTrustedBrowserSession implements AuthorityOwnedLoopbackBrowserS
     return this.#readRecord(target, "zero_server", timeoutMs);
   }
 
+  async revealExactRecordControl(
+    target: LabRecordTarget,
+    expectedIdentity: EditorRecordIdentity,
+    controlKey: string,
+    timeoutMs: number,
+  ): Promise<ExactRecordHoverControlReveal> {
+    this.#assertOpen();
+    const canonical = canonicalRecordTarget(target);
+    if (
+      expectedIdentity.recordId !== canonical.recordId ||
+      expectedIdentity.recordType.trim() === "" ||
+      expectedIdentity.recordCode.trim() === "" ||
+      expectedIdentity.recordCategory.trim() === "" ||
+      !/^[A-Za-z][A-Za-z0-9]{0,63}$/u.test(controlKey)
+    ) {
+      throw new Error("The exact record control request is malformed.");
+    }
+    const waitMs = Math.min(normalizeProbeTimeout(timeoutMs), 1_500);
+    return this.#connection.evaluate<ExactRecordHoverControlReveal>(
+      invokeFixedProbe(EXACT_RECORD_HOVER_CONTROL_REVEAL_PROBE, {
+        target: canonical,
+        expectedIdentity,
+        controlKey,
+        waitMs,
+      }),
+    );
+  }
+
+  async readRenderedBlockLibrary(
+    target: LabPageTarget,
+    timeoutMs: number,
+  ): Promise<RenderedBlockLibraryIndex> {
+    this.#assertOpen();
+    const canonical = canonicalPageTarget(target);
+    await this.readEditorPage(canonical, timeoutMs);
+    return this.#connection.evaluate<RenderedBlockLibraryIndex>(
+      invokeFixedProbe(RENDERED_BLOCK_LIBRARY_READ_PROBE, { target: canonical }),
+    );
+  }
+
+  async preflightKnownTemplateAdd(
+    target: LabPageTarget,
+    templateId: KnownObservedTemplateId,
+    timeoutMs: number,
+  ): Promise<KnownTemplateAddPreflight> {
+    this.#assertOpen();
+    const canonical = canonicalPageTarget(target);
+    await this.readEditorPage(canonical, timeoutMs);
+    return this.#connection.evaluate<KnownTemplateAddPreflight>(
+      invokeFixedProbe(KNOWN_TEMPLATE_ADD_PREFLIGHT_PROBE, {
+        target: canonical,
+        templateId,
+        expectedRuntimeFunctionHash: "19510095bc198f51ed297e2ba02291d9e6d3ebc72da7b0724886af7ff60ae5cc",
+      }),
+    );
+  }
+
   async writeStandard(
     target: LabRecordTarget,
     field: StandardWritableField,
@@ -1875,6 +2296,214 @@ class LoopbackCdpTrustedBrowserSession implements AuthorityOwnedLoopbackBrowserS
     return this.#writePublication(target, "unpublish", timeoutMs);
   }
 
+  async createPageFromReference(
+    target: LabPageTarget,
+    timeoutMs: number,
+  ): Promise<FixedReferencePageCreateResult> {
+    this.#assertOpen();
+    const canonical = canonicalPageTarget(target);
+    try {
+      const baselineProject = await this.#readLifecycleProject(canonical, timeoutMs);
+      if (
+        baselineProject.pageOrder.length < 1 ||
+        !baselineProject.pageOrder.includes(canonical.pageId)
+      ) {
+        throw new Error("Reference page is absent from the exact project baseline.");
+      }
+      const sourceBefore = await this.readEditorPage(canonical, timeoutMs);
+      if (sourceBefore.records.length === 0) {
+        throw new Error("Reference page must contain at least one exact record identity.");
+      }
+      await this.#readLifecycleProject(canonical, timeoutMs);
+      const duplicate = await this.#connection.evaluate<{
+        readonly dispatched: true;
+        readonly temporaryPageId: string;
+      }>(invokeFixedProbe(FIXED_PAGE_LIFECYCLE_COMMAND, {
+        action: "duplicate",
+        target: canonical,
+        expectedPageOrder: baselineProject.pageOrder,
+      }));
+      const createdPageId = duplicate.temporaryPageId;
+      const afterProject = await this.#readLifecycleProject(canonical, timeoutMs);
+      const added = afterProject.activePageIds.filter(
+        (pageId) => !baselineProject.activePageIds.includes(pageId),
+      );
+      const removed = baselineProject.activePageIds.filter(
+        (pageId) => !afterProject.activePageIds.includes(pageId),
+      );
+      if (
+        added.length !== 1 ||
+        added[0] !== createdPageId ||
+        removed.length !== 0 ||
+        afterProject.activePageIds.length !== baselineProject.activePageIds.length + 1
+      ) {
+        throw new Error("Duplicate response and exact project inventory delta disagree.");
+      }
+      const createdTarget = canonicalPageTarget({
+        projectId: canonical.projectId,
+        pageId: createdPageId,
+      });
+      const createdPage = await this.readEditorPage(createdTarget, timeoutMs);
+      const sourceAfter = await this.readEditorPage(canonical, timeoutMs);
+      const family = (records: readonly EditorRecordIdentity[]) => records.map(
+        ({ recordType, recordCode, recordCategory }) => ({ recordType, recordCode, recordCategory }),
+      );
+      const sourceIds = new Set(sourceBefore.records.map(({ recordId }) => recordId));
+      const createdIds = createdPage.records.map(({ recordId }) => recordId);
+      if (
+        createdPage.published !== "" ||
+        createdPage.records.length !== sourceBefore.records.length ||
+        createdIds.some((recordId) => sourceIds.has(recordId)) ||
+        new Set(createdIds).size !== createdIds.length ||
+        !jsonTextEqual(family(createdPage.records), family(sourceBefore.records)) ||
+        !jsonTextEqual(sourceAfter.records, sourceBefore.records)
+      ) {
+        throw new Error("Created reference page failed exact unpublished record-parity readback.");
+      }
+      return {
+        baseline: {
+          target: canonical,
+          activePageIds: baselineProject.activePageIds,
+          pageOrder: baselineProject.pageOrder,
+          sourceRecords: sourceBefore.records,
+        },
+        created: {
+          target: createdTarget,
+          activePageIds: afterProject.activePageIds,
+          pageOrder: afterProject.pageOrder,
+          records: createdPage.records,
+          published: false,
+        },
+      };
+    } finally {
+      await this.restoreRoot(timeoutMs);
+    }
+  }
+
+  async cleanupReferencePage(
+    sourceTarget: LabPageTarget,
+    createdPageId: string,
+    expectedActivePageIds: readonly string[],
+    expectedPageOrder: readonly string[],
+    expectedSourceRecords: readonly EditorRecordIdentity[],
+    expectedCreatedRecords: readonly EditorRecordIdentity[],
+    timeoutMs: number,
+  ): Promise<FixedReferencePageCleanupResult> {
+    this.#assertOpen();
+    const source = canonicalPageTarget(sourceTarget);
+    const created = canonicalPageTarget({ projectId: source.projectId, pageId: createdPageId });
+    try {
+      const current = await this.#readLifecycleProject(source, timeoutMs);
+      if (
+        !jsonTextEqual(current.activePageIds, expectedActivePageIds) ||
+        !jsonTextEqual(current.pageOrder, expectedPageOrder) ||
+        !current.pageOrder.includes(source.pageId) ||
+        !current.pageOrder.includes(created.pageId)
+      ) {
+        throw new Error("Reference cleanup project inventory drifted from its creation receipt.");
+      }
+      const sourceBefore = await this.readEditorPage(source, timeoutMs);
+      const createdBefore = await this.readEditorPage(created, timeoutMs);
+      if (
+        createdBefore.published !== "" ||
+        !jsonTextEqual(sourceBefore.records, expectedSourceRecords) ||
+        !jsonTextEqual(createdBefore.records, expectedCreatedRecords)
+      ) {
+        throw new Error("Reference cleanup page identities drifted from the creation receipt.");
+      }
+      await this.#readLifecycleProject(source, timeoutMs);
+      await this.#connection.evaluate(
+        invokeFixedProbe(FIXED_PAGE_LIFECYCLE_COMMAND, {
+          action: "delete_temp",
+          target: source,
+          temporaryPageId: created.pageId,
+          expectedPageOrder,
+        }),
+      );
+      const after = await this.#readLifecycleProject(source, timeoutMs);
+      const expectedAfterOrder = expectedPageOrder.filter((pageId) => pageId !== created.pageId);
+      const expectedAfterIds = expectedActivePageIds.filter((pageId) => pageId !== created.pageId);
+      const sourceAfter = await this.readEditorPage(source, timeoutMs);
+      if (
+        after.activePageIds.includes(created.pageId) ||
+        !jsonTextEqual(after.activePageIds, expectedAfterIds) ||
+        !jsonTextEqual(after.pageOrder, expectedAfterOrder) ||
+        !jsonTextEqual(sourceAfter.records, expectedSourceRecords)
+      ) {
+        throw new Error("Reference cleanup did not prove exact clone absence and source preservation.");
+      }
+      return {
+        sourceTarget: source,
+        removedPageId: created.pageId,
+        activePageIds: after.activePageIds,
+        pageOrder: after.pageOrder,
+        removedPageAbsent: true,
+        sourceRecords: sourceAfter.records,
+      };
+    } finally {
+      await this.restoreRoot(timeoutMs);
+    }
+  }
+
+  async addKnownTemplate(
+    target: LabPageTarget,
+    templateId: KnownObservedTemplateId,
+    timeoutMs: number,
+  ): Promise<FixedKnownTemplateAddResult> {
+    this.#assertOpen();
+    const canonical = canonicalPageTarget(target);
+    const expected = {
+      "128": { recordType: "128", recordCode: "TL04" },
+      "778": { recordType: "778", recordCode: "ST310N" },
+      "131": { recordType: "131", recordCode: "T123" },
+      "396": { recordType: "396", recordCode: "T396" },
+    }[templateId];
+    try {
+      const before = await this.readEditorPage(canonical, timeoutMs);
+      await this.#connection.evaluate(
+        invokeFixedProbe(FIXED_KNOWN_TEMPLATE_ADD_COMMAND, {
+          target: canonical,
+          templateId,
+          expectedRuntimeFunctionHash: "19510095bc198f51ed297e2ba02291d9e6d3ebc72da7b0724886af7ff60ae5cc",
+        }),
+      );
+      const after = await this.readEditorPage(canonical, timeoutMs);
+      const beforeIds = new Set(before.records.map(({ recordId }) => recordId));
+      const added = after.records.filter(({ recordId }) => !beforeIds.has(recordId));
+      const removed = before.records.filter(
+        ({ recordId }) => !after.records.some((record) => record.recordId === recordId),
+      );
+      const createdRecord = added[0];
+      if (
+        added.length !== 1 ||
+        removed.length !== 0 ||
+        after.records.length !== before.records.length + 1 ||
+        createdRecord === undefined ||
+        createdRecord.recordType !== expected.recordType ||
+        createdRecord.recordCode !== expected.recordCode ||
+        after.published !== before.published
+      ) {
+        throw new Error("Known-template add did not produce one exact expected record-set delta.");
+      }
+      for (const prior of before.records) {
+        const reread = after.records.find(({ recordId }) => recordId === prior.recordId);
+        if (reread === undefined || !jsonTextEqual(reread, prior)) {
+          throw new Error("Known-template add changed an existing record identity.");
+        }
+      }
+      return {
+        target: canonical,
+        templateId,
+        beforeRecords: before.records,
+        afterRecords: after.records,
+        createdRecord,
+        publishedUnchanged: true,
+      };
+    } finally {
+      await this.restoreRoot(timeoutMs);
+    }
+  }
+
   async runFixedPageLifecycle(
     target: LabPageTarget,
     timeoutMs: number,
@@ -1903,6 +2532,7 @@ class LoopbackCdpTrustedBrowserSession implements AuthorityOwnedLoopbackBrowserS
       }>(invokeFixedProbe(FIXED_PAGE_LIFECYCLE_COMMAND, {
         action: "duplicate",
         target: canonical,
+        expectedPageOrder: baselineOrder,
       }));
       temporaryPageId = duplicate.temporaryPageId;
       const afterDuplicate = await this.#readLifecycleProject(canonical, timeoutMs);
@@ -1964,6 +2594,7 @@ class LoopbackCdpTrustedBrowserSession implements AuthorityOwnedLoopbackBrowserS
           action: "delete_temp",
           target: canonical,
           temporaryPageId,
+          expectedPageOrder: restoredOrder.pageOrder,
         }),
       );
       const finalProject = await this.#readLifecycleProject(canonical, timeoutMs);
@@ -2033,6 +2664,7 @@ class LoopbackCdpTrustedBrowserSession implements AuthorityOwnedLoopbackBrowserS
                   action: "delete_temp",
                   target: canonical,
                   temporaryPageId,
+                  expectedPageOrder: current.pageOrder,
                 }),
               ).catch(() => undefined);
             }

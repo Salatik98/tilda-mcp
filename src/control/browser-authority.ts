@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
 
+import type { ChangeOperation, ElementTarget, PageTarget, RecordTarget } from "../core/contracts.js";
+import { isSafeStandardContentField } from "../core/standard-field-safety.js";
+import type { TaskAuthorityGuard } from "../core/task-authority.js";
 import {
   isLoopbackCdpWebSocketUrl,
   listCdpTargets,
@@ -11,11 +14,16 @@ import {
   type EditorRecordIdentity,
   type ExactEditorPageSnapshot,
   type ExactEditorRecordRead,
+  type ExactRecordHoverControlReveal,
   type ExactPageHeadCodeRead,
   type ExactPageSettingsRead,
   type FixedBrowserDispatchResult,
   type FixedPageLifecycleResult,
+  type FixedReferencePageCleanupResult,
   type FixedZeroWritePreflightResult,
+  type KnownObservedTemplateId,
+  type KnownTemplateAddPreflight,
+  type RenderedBlockLibraryIndex,
   type StandardWritableField,
 } from "../research/browser-session.js";
 import {
@@ -51,7 +59,31 @@ export type BrowserAuthorityFailureCode =
   | "STALE_TARGET"
   | "MUTATION_SLOT_CONSUMED"
   | "AUTHORITY_OPERATION_IN_PROGRESS"
-  | "ROOT_RESTORE_FAILED";
+  | "ROOT_RESTORE_FAILED"
+  | "AUTHORITY_EDITOR_TARGET_MISMATCH"
+  | "AUTHORITY_RECORD_CONTROL_KEY_REJECTED"
+  | "AUTHORITY_RECORD_TARGET_MISMATCH"
+  | "AUTHORITY_RECORD_IDENTITY_CHANGED"
+  | "AUTHORITY_RECORD_UI_CONTROL_MISSING"
+  | "AUTHORITY_RECORD_HOVER_HANDLER_REJECTED"
+  | "AUTHORITY_RECORD_CONTROL_NOT_REVEALED"
+  | "AUTHORITY_RECORD_CONTROL_OWNERSHIP_REJECTED";
+
+const RECORD_CONTROL_PROBE_FAILURE_CODES = new Set<BrowserAuthorityFailureCode>([
+  "TARGET_REJECTED",
+  "WRITE_IDENTITY_REJECTED",
+]);
+
+const RECORD_CONTROL_PROBE_ERROR_MAP = new Map<string, BrowserAuthorityFailureCode>([
+  ["AUTHORITY_EDITOR_TARGET_MISMATCH", "AUTHORITY_EDITOR_TARGET_MISMATCH"],
+  ["AUTHORITY_RECORD_CONTROL_KEY_REJECTED", "AUTHORITY_RECORD_CONTROL_KEY_REJECTED"],
+  ["AUTHORITY_RECORD_TARGET_MISMATCH", "AUTHORITY_RECORD_TARGET_MISMATCH"],
+  ["AUTHORITY_RECORD_IDENTITY_CHANGED", "AUTHORITY_RECORD_IDENTITY_CHANGED"],
+  ["AUTHORITY_RECORD_UI_CONTROL_MISSING", "AUTHORITY_RECORD_UI_CONTROL_MISSING"],
+  ["AUTHORITY_RECORD_HOVER_HANDLER_REJECTED", "AUTHORITY_RECORD_HOVER_HANDLER_REJECTED"],
+  ["AUTHORITY_RECORD_CONTROL_NOT_REVEALED", "AUTHORITY_RECORD_CONTROL_NOT_REVEALED"],
+  ["AUTHORITY_RECORD_CONTROL_OWNERSHIP_REJECTED", "AUTHORITY_RECORD_CONTROL_OWNERSHIP_REJECTED"],
+]);
 
 export class BrowserAuthorityError extends Error {
   constructor(
@@ -62,6 +94,27 @@ export class BrowserAuthorityError extends Error {
     super(message, options);
     this.name = "BrowserAuthorityError";
   }
+}
+
+function throwRecordControlProbeError(error: unknown): never {
+  if (error instanceof BrowserAuthorityError && RECORD_CONTROL_PROBE_FAILURE_CODES.has(error.code)) {
+    throw error;
+  }
+  const message = error instanceof Error ? error.message : "";
+  const probeCode = [...RECORD_CONTROL_PROBE_ERROR_MAP.keys()].find((code) =>
+    message.includes(code),
+  );
+  const mapped = probeCode === undefined
+    ? undefined
+    : RECORD_CONTROL_PROBE_ERROR_MAP.get(probeCode);
+  if (mapped !== undefined) {
+    throw new BrowserAuthorityError(
+      mapped,
+      `Hover-control probe failed closed at ${probeCode}.`,
+      { cause: error },
+    );
+  }
+  throw error;
 }
 
 export interface BrowserAuthorityMetadata {
@@ -96,7 +149,22 @@ export interface LoopbackCdpAdapterPort {
   readZeroModel(
     target: LabRecordTarget,
     timeoutMs?: number,
+    authorizationElementId?: string,
   ): Promise<ExactEditorRecordRead>;
+  revealExactRecordControl(
+    target: LabRecordTarget,
+    controlKey: string,
+    timeoutMs?: number,
+  ): Promise<ExactRecordHoverControlReveal>;
+  readRenderedBlockLibrary(
+    target: LabPageTarget,
+    timeoutMs?: number,
+  ): Promise<RenderedBlockLibraryIndex>;
+  preflightKnownTemplateAdd(
+    target: LabPageTarget,
+    templateId: KnownObservedTemplateId,
+    timeoutMs?: number,
+  ): Promise<KnownTemplateAddPreflight>;
   writeStandard(
     target: LabRecordTarget,
     field: StandardWritableField,
@@ -112,6 +180,7 @@ export interface LoopbackCdpAdapterPort {
     target: LabRecordTarget,
     intendedCleanElementsData: unknown,
     timeoutMs?: number,
+    authorizationElementId?: string,
   ): Promise<FixedDispatchReceipt>;
   preflightZeroModel(
     target: LabRecordTarget,
@@ -149,6 +218,46 @@ export interface LoopbackCdpAdapterPort {
     target: LabPageTarget,
     timeoutMs?: number,
   ): Promise<FixedPageLifecycleResult>;
+  createPageFromReference(
+    target: LabPageTarget,
+    timeoutMs?: number,
+  ): Promise<CreatedReferencePageReceipt>;
+  cleanupReferencePage(
+    receipt: CreatedReferencePageReceipt,
+    timeoutMs?: number,
+  ): Promise<FixedReferencePageCleanupResult>;
+  addKnownTemplate(
+    target: LabPageTarget,
+    templateId: KnownObservedTemplateId,
+    timeoutMs?: number,
+  ): Promise<CreatedKnownTemplateRecordReceipt>;
+}
+
+export interface CreatedReferencePageReceipt {
+  readonly kind: "created_reference_page";
+  readonly receiptId: string;
+  readonly accountFingerprint: string;
+  readonly sourceTarget: LabPageTarget;
+  readonly createdTarget: LabPageTarget;
+  readonly baselineActivePageIds: readonly string[];
+  readonly baselinePageOrder: readonly string[];
+  readonly createdActivePageIds: readonly string[];
+  readonly createdPageOrder: readonly string[];
+  readonly sourceRecords: readonly EditorRecordIdentity[];
+  readonly createdRecords: readonly EditorRecordIdentity[];
+  readonly consumed: false;
+}
+
+export interface CreatedKnownTemplateRecordReceipt {
+  readonly kind: "created_known_template_record";
+  readonly receiptId: string;
+  readonly accountFingerprint: string;
+  readonly target: LabRecordTarget;
+  readonly templateId: KnownObservedTemplateId;
+  readonly identity: EditorRecordIdentity;
+  readonly beforeRecordIds: readonly string[];
+  readonly afterRecordIds: readonly string[];
+  readonly consumed: false;
 }
 
 /**
@@ -194,6 +303,15 @@ export interface LoopbackCdpReadOnlyPort {
     target: LabPageTarget,
     timeoutMs?: number,
   ): Promise<ExactPageHeadCodeRead>;
+  revealExactRecordControl(
+    target: LabRecordTarget,
+    controlKey: string,
+    timeoutMs?: number,
+  ): Promise<ExactRecordHoverControlReveal>;
+  readRenderedBlockLibrary(
+    target: LabPageTarget,
+    timeoutMs?: number,
+  ): Promise<RenderedBlockLibraryIndex>;
 }
 
 export interface LoopbackBrowserReadAuthority {
@@ -208,6 +326,8 @@ export interface LoopbackBrowserReadAuthority {
 export interface AcquireLoopbackBrowserAuthorityOptions extends TrustedCaptureOptions {
   /** Cannot extend the binding capture's shorter process-local expiry. */
   readonly leaseTtlMs?: number;
+  /** Optional ephemeral exact-task authority, checked against this lease's fresh binding. */
+  readonly taskGuard?: TaskAuthorityGuard;
 }
 
 export interface LoopbackBrowserAuthorityDependencies {
@@ -234,6 +354,8 @@ const defaultDependencies: LoopbackBrowserAuthorityDependencies = {
 };
 
 let activeProcessLeaseToken: object | null = null;
+const createdReferencePageReceipts = new WeakSet<object>();
+const createdKnownTemplateRecordReceipts = new WeakSet<object>();
 
 const MAX_WRITE_VALUE_BYTES = 5_000_000;
 
@@ -354,6 +476,40 @@ function exactPlainPageTarget(value: LabPageTarget): LabPageTarget {
     return descriptor.value;
   };
   return Object.freeze({ projectId: ownString("projectId"), pageId: ownString("pageId") });
+}
+
+function taskPageTarget(target: LabPageTarget): PageTarget {
+  return { kind: "page", projectId: target.projectId, pageId: target.pageId };
+}
+
+function taskRecordTarget(target: LabRecordTarget): RecordTarget {
+  return {
+    kind: "record",
+    projectId: target.projectId,
+    pageId: target.pageId,
+    recordId: target.recordId,
+  };
+}
+
+function taskElementTarget(target: LabRecordTarget, elementId: string): ElementTarget {
+  return { ...taskRecordTarget(target), kind: "element", elementId };
+}
+
+function assertTaskGuardBinding(
+  guard: TaskAuthorityGuard | undefined,
+  binding: TrustedBindingEstablished,
+): void {
+  if (guard === undefined) return;
+  const receipt = guard.receipt();
+  if (
+    receipt.accountFingerprint !== binding.accountFingerprint ||
+    receipt.inventoryHash !== binding.inventoryHash
+  ) {
+    throw new BrowserAuthorityError(
+      "BINDING_STALE",
+      "Task authority does not match the fresh browser account and inventory binding.",
+    );
+  }
 }
 
 function exactPlainRecordTarget(value: LabRecordTarget): LabRecordTarget {
@@ -620,10 +776,60 @@ function exactZeroCleanModel(read: ExactEditorRecordRead): Record<string, unknow
   return exactZeroModel(payload.cleanElementsData, "Zero cleanElementsData").model;
 }
 
+function exactStandardStringField(read: ExactEditorRecordRead, field: string): string {
+  if (!isSafeStandardContentField(field)) {
+    throw new BrowserAuthorityError("WRITE_IDENTITY_REJECTED", "Standard field name is invalid.");
+  }
+  if ((read.ambiguousRenderedFields ?? []).includes(field)) {
+    throw new BrowserAuthorityError(
+      "WRITE_IDENTITY_REJECTED",
+      "Standard field is duplicated in the rendered exact record.",
+    );
+  }
+  const payload = plainRecord(exactJsonData(read.payload, "Standard settings payload"));
+  const record = payload === null ? null : plainRecord(payload.record);
+  if (record === null) {
+    throw new BrowserAuthorityError("WRITE_IDENTITY_REJECTED", "Standard settings record is missing.");
+  }
+  const raw = Object.hasOwn(record, field) ? record[field] : undefined;
+  if (raw !== undefined && typeof raw !== "string") {
+    throw new BrowserAuthorityError(
+      "WRITE_IDENTITY_REJECTED",
+      "Standard field exists but is not a top-level string.",
+    );
+  }
+  const rendered = (read.renderedFields ?? []).filter((candidate) => candidate.name === field);
+  if (rendered.length > 1 || rendered.some((candidate) => typeof candidate.value !== "string")) {
+    throw new BrowserAuthorityError("WRITE_IDENTITY_REJECTED", "Rendered standard field is ambiguous.");
+  }
+  const renderedValue = rendered[0]?.value ??
+    (read.writableField?.name === field ? read.writableField.value : undefined);
+  if (typeof raw === "string" && renderedValue !== undefined && raw !== renderedValue) {
+    throw new BrowserAuthorityError(
+      "WRITE_IDENTITY_REJECTED",
+      "Standard settings and rendered field values disagree.",
+    );
+  }
+  const value = typeof raw === "string" ? raw : renderedValue;
+  if (value === undefined) {
+    throw new BrowserAuthorityError(
+      "WRITE_IDENTITY_REJECTED",
+      "Standard field is absent from the fresh exact record read.",
+    );
+  }
+  return value;
+}
+
+interface ValidatedZeroTransition {
+  readonly model: Record<string, unknown>;
+  readonly operation: ChangeOperation;
+  readonly elementId: string;
+}
+
 function assertSupportedZeroTransition(
   current: Record<string, unknown>,
   intendedValue: unknown,
-): Record<string, unknown> {
+): ValidatedZeroTransition {
   const currentParts = exactZeroModel(current, "Current Zero cleanElementsData");
   const intendedData = exactJsonData(intendedValue, "Intended Zero clean runtime model");
   const intendedParts = exactZeroModel(intendedData, "Intended Zero cleanElementsData");
@@ -641,6 +847,18 @@ function assertSupportedZeroTransition(
     typeof element.elem_id === "string" ? element.elem_id : "";
   const type = (element: Record<string, unknown>): unknown =>
     element.type ?? element.elem_type;
+  const basicElementTypes = new Set(["text", "image", "shape", "button", "html"]);
+  const primitiveKind = (value: unknown): "string" | "number" | "boolean" | "null" | null => {
+    if (value === null) return "null";
+    if (typeof value === "string" || typeof value === "boolean") {
+      return typeof value as "string" | "boolean";
+    }
+    if (typeof value === "number" && Number.isFinite(value)) return "number";
+    return null;
+  };
+  const canonicalProperty = (value: string): boolean =>
+    /^[A-Za-z][A-Za-z0-9_:-]{0,127}$/u.test(value) &&
+    !["elem_id", "type", "elem_type"].includes(value);
   const stripCloneFields = (element: Record<string, unknown>): Record<string, unknown> =>
     Object.fromEntries(
       Object.entries(element).filter(
@@ -666,7 +884,7 @@ function assertSupportedZeroTransition(
     keys.every((key) => Object.hasOwn(right, key) && jsonEqual(left[key], right[key]));
   const maxNumericKey = (keys: readonly string[]): number =>
     Math.max(...keys.map((key) => Number(key)));
-  let accepted = false;
+  let authorization: Omit<ValidatedZeroTransition, "model"> | null = null;
   if (sameKeySet(currentParts.keys, intendedParts.keys)) {
     const changed: Array<{ before: Record<string, unknown>; after: Record<string, unknown> }> = [];
     let metadataChanged = false;
@@ -695,17 +913,40 @@ function assertSupportedZeroTransition(
       const changedKeys = [...keys].filter(
         (key) => !jsonEqual(change.before[key], change.after[key]),
       );
-      accepted =
-        (changedKeys.length === 1 &&
+      const property = changedKeys[0];
+      const currentType = type(change.before);
+      const genericPrimitivePatch =
+        changedKeys.length === 1 &&
+        property !== undefined &&
+        canonicalProperty(property) &&
+        basicElementTypes.has(String(currentType)) &&
+        type(change.after) === currentType &&
+        Object.hasOwn(change.before, property) &&
+        Object.hasOwn(change.after, property) &&
+        primitiveKind(change.before[property]) !== null &&
+        primitiveKind(change.before[property]) === primitiveKind(change.after[property]);
+      const legacyLinkPatch =
+        changedKeys.length === 1 &&
           changedKeys[0] === "link" &&
           type(change.before) === "text" &&
           (typeof change.after.link === "string" ||
-            (typeof change.before.link === "string" && !Object.hasOwn(change.after, "link")))) ||
-        (changedKeys.length === 1 &&
+            (typeof change.before.link === "string" && !Object.hasOwn(change.after, "link")));
+      const legacyResponsivePatch =
+        changedKeys.length === 1 &&
           changedKeys[0] === "left-res-480" &&
           type(change.before) === "shape" &&
           typeof change.after["left-res-480"] === "number" &&
-          Number.isFinite(change.after["left-res-480"]));
+          Number.isFinite(change.after["left-res-480"]);
+      if (genericPrimitivePatch || legacyLinkPatch || legacyResponsivePatch) {
+        authorization = {
+          operation: legacyLinkPatch
+            ? "zero.leaf.patch"
+            : legacyResponsivePatch
+              ? "zero.responsive.patch"
+              : "zero.property.patch",
+          elementId: id(change.before),
+        };
+      }
     }
   } else {
     const addedKeys = intendedParts.elementKeys.filter(
@@ -731,17 +972,24 @@ function assertSupportedZeroTransition(
           .filter(
             (element): element is Record<string, unknown> =>
               element !== null &&
-              type(element) === "shape" &&
+              basicElementTypes.has(String(type(element))) &&
+              type(element) === type(clone) &&
               jsonEqual(stripCloneFields(element), stripCloneFields(clone)),
           );
-        accepted =
+        const accepted =
           addedKey === expectedKey &&
           allCommonValuesEqual(before, after, currentParts.keys) &&
-          type(clone) === "shape" &&
+          basicElementTypes.has(String(type(clone))) &&
           ZERO_ELEMENT_ID.test(id(clone)) &&
           !currentParts.ids.has(id(clone)) &&
           sources.length === 1 &&
           runtimeGeometryIsFinite(clone);
+        if (accepted) {
+          authorization = {
+            operation: type(clone) === "shape" ? "zero.shape.clone" : "zero.element.clone",
+            elementId: id(sources[0]!),
+          };
+        }
       }
     } else if (addedKeys.length === 0 && removedKeys.length === 1 && metadataUnchanged) {
       const removedKey = removedKeys[0]!;
@@ -753,27 +1001,34 @@ function assertSupportedZeroTransition(
           .filter(
             (element): element is Record<string, unknown> =>
               element !== null &&
-              type(element) === "shape" &&
+              basicElementTypes.has(String(type(element))) &&
+              type(element) === type(removed) &&
               jsonEqual(stripCloneFields(element), stripCloneFields(removed)),
           );
-        accepted =
+        const accepted =
           removedKey === expectedKey &&
           allCommonValuesEqual(after, before, intendedParts.keys) &&
-          type(removed) === "shape" &&
+          basicElementTypes.has(String(type(removed))) &&
           ZERO_ELEMENT_ID.test(id(removed)) &&
           !intendedParts.ids.has(id(removed)) &&
           sources.length === 1 &&
           runtimeGeometryIsFinite(removed);
+        if (accepted) {
+          authorization = {
+            operation: type(removed) === "shape" ? "zero.shape.clone" : "zero.element.clone",
+            elementId: id(sources[0]!),
+          };
+        }
       }
     }
   }
-  if (!accepted) {
+  if (authorization === null || !ZERO_ELEMENT_ID.test(authorization.elementId)) {
     throw new BrowserAuthorityError(
       "WRITE_IDENTITY_REJECTED",
-      "Zero write must be exactly one reproduced text link, shape left-res-480, appended shape clone, or its strict inverse removal.",
+      "Zero write must be one existing primitive property patch, one supported basic-element clone, or its strict inverse removal.",
     );
   }
-  return after;
+  return { model: after, ...authorization };
 }
 
 function assertMetaDescriptionTransition(
@@ -828,13 +1083,16 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
     private readonly session: AuthorityOwnedLoopbackBrowserSession,
     private readonly processLeaseToken: object,
     private readonly dependencies: LoopbackBrowserAuthorityDependencies,
+    private readonly taskGuard: TaskAuthorityGuard | undefined,
     leaseTtlMs: number,
   ) {
     const acquiredAtMs = dependencies.now();
     const bindingExpiry = Date.parse(binding.captureContext.expiresAt ?? "");
+    const taskExpiry = Date.parse(taskGuard?.receipt().expiresAt ?? "");
     this.#expiresAtMs = Math.min(
       acquiredAtMs + leaseTtlMs,
       Number.isFinite(bindingExpiry) ? bindingExpiry : acquiredAtMs,
+      Number.isFinite(taskExpiry) ? taskExpiry : acquiredAtMs + leaseTtlMs,
     );
     this.inventory = binding.inventory;
     this.metadata = Object.freeze({
@@ -854,8 +1112,23 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
         this.#readRecord(target, "standard", timeoutMs),
       readT123Content: (target: LabRecordTarget, timeoutMs?: number) =>
         this.#readRecord(target, "t123", timeoutMs),
-      readZeroModel: (target: LabRecordTarget, timeoutMs?: number) =>
-        this.#readRecord(target, "zero", timeoutMs),
+      readZeroModel: (
+        target: LabRecordTarget,
+        timeoutMs?: number,
+        authorizationElementId?: string,
+      ) => this.#readRecord(target, "zero", timeoutMs, authorizationElementId),
+      revealExactRecordControl: (
+        target: LabRecordTarget,
+        controlKey: string,
+        timeoutMs?: number,
+      ) => this.#revealExactRecordControl(target, controlKey, timeoutMs),
+      readRenderedBlockLibrary: (target: LabPageTarget, timeoutMs?: number) =>
+        this.#readRenderedBlockLibrary(target, timeoutMs),
+      preflightKnownTemplateAdd: (
+        target: LabPageTarget,
+        templateId: KnownObservedTemplateId,
+        timeoutMs?: number,
+      ) => this.#preflightKnownTemplateAdd(target, templateId, timeoutMs),
       writeStandard: (
         target: LabRecordTarget,
         field: StandardWritableField,
@@ -868,7 +1141,13 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
         target: LabRecordTarget,
         intendedCleanElementsData: unknown,
         timeoutMs?: number,
-      ) => this.#writeZeroModel(target, intendedCleanElementsData, timeoutMs),
+        authorizationElementId?: string,
+      ) => this.#writeZeroModel(
+        target,
+        intendedCleanElementsData,
+        timeoutMs,
+        authorizationElementId,
+      ),
       preflightZeroModel: (
         target: LabRecordTarget,
         intendedCleanElementsData: unknown,
@@ -895,12 +1174,37 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
         this.#writePublication(target, "unpublish", timeoutMs),
       runFixedPageLifecycle: (target: LabPageTarget, timeoutMs?: number) =>
         this.#runFixedPageLifecycle(target, timeoutMs),
+      createPageFromReference: (target: LabPageTarget, timeoutMs?: number) =>
+        this.#createPageFromReference(target, timeoutMs),
+      cleanupReferencePage: (receipt: CreatedReferencePageReceipt, timeoutMs?: number) =>
+        this.#cleanupReferencePage(receipt, timeoutMs),
+      addKnownTemplate: (
+        target: LabPageTarget,
+        templateId: KnownObservedTemplateId,
+        timeoutMs?: number,
+      ) => this.#addKnownTemplate(target, templateId, timeoutMs),
     });
   }
 
   assertFresh(): void {
     if (this.#closed) {
       throw new BrowserAuthorityError("AUTHORITY_CLOSED", "Browser authority lease is closed.");
+    }
+    if (this.taskGuard !== undefined) {
+      // receipt() rechecks expiry and the manager-owned revocation token. This
+      // is deliberately repeated at the mutation boundary so replacing or
+      // clearing a task while an adapter performs its fresh reread cannot let
+      // the old lease dispatch afterward.
+      const task = this.taskGuard.receipt();
+      if (
+        task.accountFingerprint !== this.metadata.accountFingerprint ||
+        task.inventoryHash !== this.metadata.inventoryHash
+      ) {
+        throw new BrowserAuthorityError(
+          "BINDING_STALE",
+          "Task authority no longer matches this exact browser binding.",
+        );
+      }
     }
     if (
       activeProcessLeaseToken !== this.processLeaseToken ||
@@ -960,15 +1264,7 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
   ): Promise<ExactEditorPageSnapshot> {
     const exactTarget = exactPlainPageTarget(target);
     return this.#runAdapterOperation(async () => {
-      try {
-        assertLabPageTarget(this.config, exactTarget, this.binding.inventory);
-      } catch (error) {
-        throw new BrowserAuthorityError(
-          "TARGET_REJECTED",
-          error instanceof Error ? error.message : "Page target guard rejected the operation.",
-          { cause: error },
-        );
-      }
+      this.#assertReadPageTarget(exactTarget);
       return this.session.readEditorPage(exactTarget, normalizeAdapterTimeout(timeoutMs));
     });
   }
@@ -977,17 +1273,14 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
     target: LabRecordTarget,
     kind: "standard" | "t123" | "zero",
     timeoutMs: number | undefined,
+    authorizationElementId?: string,
   ): Promise<ExactEditorRecordRead> {
+    const exactTarget = exactPlainRecordTarget(target);
     return this.#runAdapterOperation(async () => {
-      let exactTarget: LabRecordTarget;
-      try {
-        exactTarget = assertLabRecordTarget(this.config, target, this.binding.inventory);
-      } catch (error) {
-        throw new BrowserAuthorityError(
-          "TARGET_REJECTED",
-          error instanceof Error ? error.message : "Record target guard rejected the operation.",
-          { cause: error },
-        );
+      if (kind === "zero" && authorizationElementId !== undefined) {
+        this.#assertReadElementTarget(exactTarget, authorizationElementId);
+      } else {
+        this.#assertReadRecordTarget(exactTarget);
       }
       const boundedTimeout = normalizeAdapterTimeout(timeoutMs);
       if (kind === "standard") {
@@ -1000,48 +1293,195 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
     });
   }
 
+  async #revealExactRecordControl(
+    target: LabRecordTarget,
+    controlKey: string,
+    timeoutMs: number | undefined,
+  ): Promise<ExactRecordHoverControlReveal> {
+    if (!/^[A-Za-z][A-Za-z0-9]{0,63}$/u.test(controlKey)) {
+      throw new BrowserAuthorityError(
+        "TARGET_REJECTED",
+        "Record control key must be a bounded property identifier.",
+      );
+    }
+    return this.#runAdapterOperation(async () => {
+      const exactTarget = exactPlainRecordTarget(target);
+      this.#assertReadRecordTarget(exactTarget);
+      const boundedTimeout = normalizeAdapterTimeout(timeoutMs);
+      const page = await this.session.readEditorPage(exactTarget, boundedTimeout);
+      const identity = this.#exactRecordIdentity(page, exactTarget);
+      let reveal: ExactRecordHoverControlReveal;
+      try {
+        reveal = await this.session.revealExactRecordControl(
+          exactTarget,
+          identity,
+          controlKey,
+          boundedTimeout,
+        );
+      } catch (error) {
+        throwRecordControlProbeError(error);
+      }
+      if (
+        reveal.target.projectId !== exactTarget.projectId ||
+        reveal.target.pageId !== exactTarget.pageId ||
+        reveal.target.recordId !== exactTarget.recordId ||
+        reveal.ownerRecordId !== exactTarget.recordId ||
+        reveal.controlKey !== controlKey ||
+        reveal.connected !== true ||
+        reveal.identity.recordId !== identity.recordId ||
+        reveal.identity.recordType !== identity.recordType ||
+        reveal.identity.recordCode !== identity.recordCode ||
+        reveal.identity.recordCategory !== identity.recordCategory
+      ) {
+        throw new BrowserAuthorityError(
+          "WRITE_IDENTITY_REJECTED",
+          "Hover-revealed control evidence is not owned by the exact record identity.",
+        );
+      }
+      return Object.freeze({
+        ...reveal,
+        target: exactPlainRecordTarget(reveal.target),
+        identity: Object.freeze({ ...reveal.identity }),
+      });
+    });
+  }
+
+  async #readRenderedBlockLibrary(
+    target: LabPageTarget,
+    timeoutMs: number | undefined,
+  ): Promise<RenderedBlockLibraryIndex> {
+    const exactTarget = exactPlainPageTarget(target);
+    return this.#runAdapterOperation(async () => {
+      this.#assertReadPageTarget(exactTarget);
+      const index = await this.session.readRenderedBlockLibrary(
+        exactTarget,
+        normalizeAdapterTimeout(timeoutMs),
+      );
+      if (
+        index.target.projectId !== exactTarget.projectId ||
+        index.target.pageId !== exactTarget.pageId ||
+        index.mutationIssued !== false ||
+        index.templates.length === 0 ||
+        index.templates.length > 2_000 ||
+        index.categories.length > 100 ||
+        index.categories.some((category) => category.trim() !== category || category.length < 1 || category.length > 128)
+      ) {
+        throw new BrowserAuthorityError(
+          "WRITE_IDENTITY_REJECTED",
+          "Rendered block-library inspection did not remain bound to the exact page.",
+        );
+      }
+      const identities = new Set<string>();
+      for (const template of index.templates) {
+        const identity = `${template.templateId}:${template.code}`;
+        if (
+          !/^[1-9]\d*$/u.test(template.templateId) ||
+          !/^[A-Z][A-Z0-9]{1,15}$/u.test(template.code) ||
+          identities.has(identity)
+        ) {
+          throw new BrowserAuthorityError(
+            "WRITE_IDENTITY_REJECTED",
+            "Rendered block-library template identity is invalid or duplicated.",
+          );
+        }
+        identities.add(identity);
+      }
+      return Object.freeze({
+        target: exactPlainPageTarget(index.target),
+        categories: Object.freeze([...index.categories]),
+        templates: Object.freeze(index.templates.map((template) => Object.freeze({ ...template }))),
+        mutationIssued: false,
+      });
+    });
+  }
+
+  async #preflightKnownTemplateAdd(
+    target: LabPageTarget,
+    templateId: KnownObservedTemplateId,
+    timeoutMs: number | undefined,
+  ): Promise<KnownTemplateAddPreflight> {
+    if (!["128", "778", "131", "396"].includes(templateId)) {
+      throw new BrowserAuthorityError("TARGET_REJECTED", "Template is outside EXP-06 observations.");
+    }
+    const exactTarget = exactPlainPageTarget(target);
+    return this.#runAdapterOperation(async () => {
+      this.#assertReadPageTarget(exactTarget);
+      const result = await this.session.preflightKnownTemplateAdd(
+        exactTarget,
+        templateId,
+        normalizeAdapterTimeout(timeoutMs),
+      );
+      if (
+        result.target.projectId !== exactTarget.projectId ||
+        result.target.pageId !== exactTarget.pageId ||
+        result.templateId !== templateId ||
+        result.runtimeFunction !== "tp__addRecord" ||
+        result.runtimeFunctionHash !== "19510095bc198f51ed297e2ba02291d9e6d3ebc72da7b0724886af7ff60ae5cc" ||
+        result.mutationIssued !== false ||
+        result.evidence !== "LIVE_OBSERVED_PREFLIGHT_ONLY"
+      ) {
+        throw new BrowserAuthorityError(
+          "WRITE_IDENTITY_REJECTED",
+          "Known-template add preflight did not match the exact EXP-06 runtime observation.",
+        );
+      }
+      return Object.freeze({ ...result, target: exactPlainPageTarget(result.target) });
+    });
+  }
+
   async #writeStandard(
     target: LabRecordTarget,
     field: StandardWritableField,
     value: string,
     timeoutMs: number | undefined,
   ): Promise<FixedDispatchReceipt> {
-    if (field !== "title" && field !== "buttontitle") {
+    if (!isSafeStandardContentField(field)) {
       throw new BrowserAuthorityError(
         "WRITE_IDENTITY_REJECTED",
-        "Standard write supports only title or buttontitle.",
+        "Standard write requires a bounded canonical top-level field name.",
       );
     }
     const boundedValue = assertBoundedWriteValue(value, "Standard field value");
     return this.#runAdapterOperation(async () => {
       this.#assertMutationSlotAvailable();
-      const exactTarget = this.#guardRecordTarget(target);
+      const exactTarget = exactPlainRecordTarget(target);
+      this.#assertChangeRecordTarget("standard.field.patch", exactTarget);
       const page = await this.session.readEditorPage(
         exactTarget,
         normalizeAdapterTimeout(timeoutMs),
       );
       const identity = this.#exactRecordIdentity(page, exactTarget);
-      const identityAllowed =
-        (field === "title" &&
-          identity.recordType === "128" &&
-          identity.recordCode === "TL04") ||
-        (field === "buttontitle" &&
-          identity.recordType === "778" &&
-          identity.recordCode === "ST310N");
-      if (!identityAllowed) {
-        throw new BrowserAuthorityError(
-          "WRITE_IDENTITY_REJECTED",
-          "Current record identity is not proved for the requested standard field contract.",
-        );
-      }
-      this.assertFresh();
-      const operationId = this.#consumeMutationSlot();
-      const result = await this.session.writeStandard(
+      const fresh = await this.session.readStandardSettings(
         exactTarget,
-        field,
-        boundedValue,
         normalizeAdapterTimeout(timeoutMs),
       );
+      if (
+        fresh.target.projectId !== exactTarget.projectId ||
+        fresh.target.pageId !== exactTarget.pageId ||
+        fresh.target.recordId !== exactTarget.recordId ||
+        fresh.identity.recordId !== identity.recordId ||
+        fresh.identity.recordType !== identity.recordType ||
+        fresh.identity.recordCode !== identity.recordCode ||
+        fresh.identity.recordCategory !== identity.recordCategory
+      ) {
+        throw new BrowserAuthorityError(
+          "WRITE_IDENTITY_REJECTED",
+          "Fresh standard field read does not match the exact editor record identity.",
+        );
+      }
+      if (exactStandardStringField(fresh, field) === boundedValue) {
+        throw new BrowserAuthorityError(
+          "WRITE_IDENTITY_REJECTED",
+          "Standard field write must change the exact fresh string value.",
+        );
+      }
+      const { operationId, result } = await this.#dispatchMutation(() =>
+        this.session.writeStandard(
+          exactTarget,
+          field,
+          boundedValue,
+          normalizeAdapterTimeout(timeoutMs),
+        ));
       return this.#dispatchReceipt(operationId, result);
     });
   }
@@ -1054,7 +1494,8 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
     const boundedCode = assertBoundedWriteValue(code, "T123 code");
     return this.#runAdapterOperation(async () => {
       this.#assertMutationSlotAvailable();
-      const exactTarget = this.#guardRecordTarget(target);
+      const exactTarget = exactPlainRecordTarget(target);
+      this.#assertChangeRecordTarget("t123.code.replace", exactTarget);
       const page = await this.session.readEditorPage(
         exactTarget,
         normalizeAdapterTimeout(timeoutMs),
@@ -1066,13 +1507,12 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
           "Current record identity is not the reproduced T123 / 131 contract.",
         );
       }
-      this.assertFresh();
-      const operationId = this.#consumeMutationSlot();
-      const result = await this.session.writeT123(
-        exactTarget,
-        boundedCode,
-        normalizeAdapterTimeout(timeoutMs),
-      );
+      const { operationId, result } = await this.#dispatchMutation(() =>
+        this.session.writeT123(
+          exactTarget,
+          boundedCode,
+          normalizeAdapterTimeout(timeoutMs),
+        ));
       return this.#dispatchReceipt(operationId, result);
     });
   }
@@ -1083,7 +1523,8 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
     timeoutMs: number | undefined,
   ): Promise<FixedZeroWritePreflightResult> {
     return this.#runAdapterOperation(async () => {
-      const exactTarget = this.#guardRecordTarget(target);
+      const exactTarget = exactPlainRecordTarget(target);
+      this.#assertReadRecordTarget(exactTarget);
       const boundedTimeout = normalizeAdapterTimeout(timeoutMs);
       const fresh = await this.session.readZeroModel(exactTarget, boundedTimeout);
       if (
@@ -1099,7 +1540,7 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
         );
       }
       const current = exactZeroCleanModel(fresh);
-      const intended = assertSupportedZeroTransition(current, intendedCleanElementsData);
+      const intended = assertSupportedZeroTransition(current, intendedCleanElementsData).model;
       this.assertFresh();
       return this.session.preflightZeroModel(exactTarget, intended, boundedTimeout);
     });
@@ -1109,10 +1550,12 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
     target: LabRecordTarget,
     intendedCleanElementsData: unknown,
     timeoutMs: number | undefined,
+    authorizationElementId?: string,
   ): Promise<FixedDispatchReceipt> {
     return this.#runAdapterOperation(async () => {
       this.#assertMutationSlotAvailable();
-      const exactTarget = this.#guardRecordTarget(target);
+      const exactTarget = exactPlainRecordTarget(target);
+      if (this.taskGuard === undefined) this.#assertReadRecordTarget(exactTarget);
       const boundedTimeout = normalizeAdapterTimeout(timeoutMs);
       const fresh = await this.session.readZeroModel(exactTarget, boundedTimeout);
       if (
@@ -1128,14 +1571,27 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
         );
       }
       const current = exactZeroCleanModel(fresh);
-      const intended = assertSupportedZeroTransition(current, intendedCleanElementsData);
-      this.assertFresh();
-      const operationId = this.#consumeMutationSlot();
-      const result = await this.session.writeZeroModel(
+      const transition = assertSupportedZeroTransition(current, intendedCleanElementsData);
+      if (
+        authorizationElementId !== undefined &&
+        transition.elementId !== authorizationElementId
+      ) {
+        throw new BrowserAuthorityError(
+          "WRITE_IDENTITY_REJECTED",
+          "Validated Zero transition does not match the exact requested element target.",
+        );
+      }
+      this.#assertChangeElementTarget(
+        transition.operation,
         exactTarget,
-        intended,
-        boundedTimeout,
+        transition.elementId,
       );
+      const { operationId, result } = await this.#dispatchMutation(() =>
+        this.session.writeZeroModel(
+          exactTarget,
+          transition.model,
+          boundedTimeout,
+        ));
       return this.#dispatchReceipt(operationId, result);
     });
   }
@@ -1146,7 +1602,7 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
   ): Promise<ExactPageSettingsRead> {
     const exactTarget = exactPlainPageTarget(target);
     return this.#runAdapterOperation(async () => {
-      this.#guardPageTarget(exactTarget);
+      this.#assertReadPageTarget(exactTarget);
       const read = await this.session.readPageSettings(
         exactTarget,
         normalizeAdapterTimeout(timeoutMs),
@@ -1166,7 +1622,7 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
     const exactTarget = exactPlainPageTarget(target);
     return this.#runAdapterOperation(async () => {
       this.#assertMutationSlotAvailable();
-      this.#guardPageTarget(exactTarget);
+      this.#assertChangePageTarget("page.seo.patch", exactTarget);
       const boundedTimeout = normalizeAdapterTimeout(timeoutMs);
       const fresh = await this.session.readPageSettings(exactTarget, boundedTimeout);
       if (
@@ -1180,13 +1636,12 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
       }
       const current = exactFormFields(fresh.fields, "Current page settings form");
       const intended = assertMetaDescriptionTransition(current, intendedFields);
-      this.assertFresh();
-      const operationId = this.#consumeMutationSlot();
-      const result = await this.session.writePageSettings(
-        exactTarget,
-        intended,
-        boundedTimeout,
-      );
+      const { operationId, result } = await this.#dispatchMutation(() =>
+        this.session.writePageSettings(
+          exactTarget,
+          intended,
+          boundedTimeout,
+        ));
       return this.#dispatchReceipt(operationId, result);
     });
   }
@@ -1197,7 +1652,7 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
   ): Promise<ExactPageHeadCodeRead> {
     const exactTarget = exactPlainPageTarget(target);
     return this.#runAdapterOperation(async () => {
-      this.#guardPageTarget(exactTarget);
+      this.#assertReadPageTarget(exactTarget);
       const read = await this.session.readPageHeadCode(
         exactTarget,
         normalizeAdapterTimeout(timeoutMs),
@@ -1233,7 +1688,7 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
     );
     return this.#runAdapterOperation(async () => {
       this.#assertMutationSlotAvailable();
-      this.#guardPageTarget(exactTarget);
+      this.#assertChangePageTarget("page.head.code.replace", exactTarget);
       const boundedTimeout = normalizeAdapterTimeout(timeoutMs);
       const fresh = await this.session.readPageHeadCode(exactTarget, boundedTimeout);
       if (
@@ -1257,14 +1712,13 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
           "Page HEAD code changed after the adapter snapshot and before dispatch.",
         );
       }
-      this.assertFresh();
-      const operationId = this.#consumeMutationSlot();
-      const result = await this.session.writePageHeadCode(
-        exactTarget,
-        boundedCode,
-        boundedExpectedCode,
-        boundedTimeout,
-      );
+      const { operationId, result } = await this.#dispatchMutation(() =>
+        this.session.writePageHeadCode(
+          exactTarget,
+          boundedCode,
+          boundedExpectedCode,
+          boundedTimeout,
+        ));
       return this.#dispatchReceipt(operationId, result);
     });
   }
@@ -1277,7 +1731,7 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
     const exactTarget = exactPlainPageTarget(target);
     return this.#runAdapterOperation(async () => {
       this.#assertMutationSlotAvailable();
-      this.#guardPageTarget(exactTarget);
+      this.#assertPublicationTarget(action, exactTarget);
       const boundedTimeout = normalizeAdapterTimeout(timeoutMs);
       const fresh = await this.session.readEditorPage(exactTarget, boundedTimeout);
       if (
@@ -1291,12 +1745,187 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
           "Current editor globals do not prove the exact publication page target.",
         );
       }
-      this.assertFresh();
-      const operationId = this.#consumeMutationSlot();
-      const result = action === "publish"
-        ? await this.session.publishPage(exactTarget, boundedTimeout)
-        : await this.session.unpublishPage(exactTarget, boundedTimeout);
+      const { operationId, result } = await this.#dispatchMutation(() =>
+        action === "publish"
+          ? this.session.publishPage(exactTarget, boundedTimeout)
+          : this.session.unpublishPage(exactTarget, boundedTimeout));
       return this.#dispatchReceipt(operationId, result);
+    });
+  }
+
+  async #createPageFromReference(
+    target: LabPageTarget,
+    timeoutMs: number | undefined,
+  ): Promise<CreatedReferencePageReceipt> {
+    const exactTarget = exactPlainPageTarget(target);
+    return this.#runAdapterOperation(async () => {
+      this.#assertMutationSlotAvailable();
+      this.#assertChangePageTarget("page.reference.clone", exactTarget);
+      const boundedTimeout = normalizeAdapterTimeout(timeoutMs);
+      const { operationId, result } = await this.#dispatchMutation(() =>
+        this.session.createPageFromReference(
+          exactTarget,
+          boundedTimeout,
+        ));
+      const createdTarget = exactPlainPageTarget(result.created.target);
+      const family = (records: readonly EditorRecordIdentity[]) => records.map(
+        ({ recordType, recordCode, recordCategory }) => ({ recordType, recordCode, recordCategory }),
+      );
+      const baselineIds = new Set(result.baseline.activePageIds);
+      const inventoryPageIds = this.inventory.pageOwnership[exactTarget.projectId] ?? [];
+      const createdDelta = result.created.activePageIds.filter((pageId) => !baselineIds.has(pageId));
+      const sourceRecordIds = new Set(result.baseline.sourceRecords.map(({ recordId }) => recordId));
+      if (
+        result.baseline.target.projectId !== exactTarget.projectId ||
+        result.baseline.target.pageId !== exactTarget.pageId ||
+        createdTarget.projectId !== exactTarget.projectId ||
+        createdTarget.pageId === exactTarget.pageId ||
+        result.created.published !== false ||
+        result.baseline.activePageIds.length < 1 ||
+        result.baseline.activePageIds.length !== inventoryPageIds.length ||
+        result.baseline.activePageIds.some((pageId) => !inventoryPageIds.includes(pageId)) ||
+        result.baseline.activePageIds.length !== result.baseline.pageOrder.length ||
+        result.created.activePageIds.length !== result.created.pageOrder.length ||
+        createdDelta.length !== 1 ||
+        createdDelta[0] !== createdTarget.pageId ||
+        result.created.records.length !== result.baseline.sourceRecords.length ||
+        result.created.records.some(({ recordId }) => sourceRecordIds.has(recordId)) ||
+        !jsonEqual(family(result.created.records), family(result.baseline.sourceRecords))
+      ) {
+        throw new BrowserAuthorityError(
+          "WRITE_IDENTITY_REJECTED",
+          "Reference-page duplicate did not prove one exact unpublished parity clone.",
+        );
+      }
+      const freezeRecords = (records: readonly EditorRecordIdentity[]) => Object.freeze(
+        records.map((record) => Object.freeze({ ...record })),
+      );
+      const receipt = Object.freeze({
+        kind: "created_reference_page" as const,
+        receiptId: operationId,
+        accountFingerprint: this.metadata.accountFingerprint,
+        sourceTarget: exactTarget,
+        createdTarget,
+        baselineActivePageIds: Object.freeze([...result.baseline.activePageIds]),
+        baselinePageOrder: Object.freeze([...result.baseline.pageOrder]),
+        createdActivePageIds: Object.freeze([...result.created.activePageIds]),
+        createdPageOrder: Object.freeze([...result.created.pageOrder]),
+        sourceRecords: freezeRecords(result.baseline.sourceRecords),
+        createdRecords: freezeRecords(result.created.records),
+        consumed: false as const,
+      });
+      createdReferencePageReceipts.add(receipt);
+      return receipt;
+    });
+  }
+
+  async #cleanupReferencePage(
+    receipt: CreatedReferencePageReceipt,
+    timeoutMs: number | undefined,
+  ): Promise<FixedReferencePageCleanupResult> {
+    if (!createdReferencePageReceipts.has(receipt) || !Object.isFrozen(receipt)) {
+      throw new BrowserAuthorityError(
+        "TARGET_REJECTED",
+        "Reference cleanup requires an unconsumed process-owned creation receipt.",
+      );
+    }
+    return this.#runAdapterOperation(async () => {
+      this.#assertMutationSlotAvailable();
+      if (receipt.accountFingerprint !== this.metadata.accountFingerprint) {
+        throw new BrowserAuthorityError("TARGET_REJECTED", "Reference receipt belongs to another account.");
+      }
+      const source = exactPlainPageTarget(receipt.sourceTarget);
+      const created = exactPlainPageTarget(receipt.createdTarget);
+      this.#assertChangePageTarget("page.reference.cleanup", source);
+      const ownedPages = this.inventory.pageOwnership[source.projectId] ?? [];
+      if (
+        created.projectId !== source.projectId ||
+        created.pageId === source.pageId ||
+        !ownedPages.includes(source.pageId) ||
+        !ownedPages.includes(created.pageId)
+      ) {
+        throw new BrowserAuthorityError(
+          "TARGET_REJECTED",
+          "Current inventory does not own both receipt-bound reference pages.",
+        );
+      }
+      const { result } = await this.#dispatchMutation(
+        () => this.session.cleanupReferencePage(
+          source,
+          created.pageId,
+          receipt.createdActivePageIds,
+          receipt.createdPageOrder,
+          receipt.sourceRecords,
+          receipt.createdRecords,
+          normalizeAdapterTimeout(timeoutMs),
+        ),
+        // Consume before browser invocation. An ambiguous delete may never retry.
+        () => createdReferencePageReceipts.delete(receipt),
+      );
+      return result;
+    });
+  }
+
+  async #addKnownTemplate(
+    target: LabPageTarget,
+    templateId: KnownObservedTemplateId,
+    timeoutMs: number | undefined,
+  ): Promise<CreatedKnownTemplateRecordReceipt> {
+    if (!["128", "778", "131", "396"].includes(templateId)) {
+      throw new BrowserAuthorityError("TARGET_REJECTED", "Template is outside EXP-06 observations.");
+    }
+    const exactTarget = exactPlainPageTarget(target);
+    return this.#runAdapterOperation(async () => {
+      this.#assertMutationSlotAvailable();
+      this.#assertChangePageTarget("standard.template.add", exactTarget);
+      const { operationId, result } = await this.#dispatchMutation(() =>
+        this.session.addKnownTemplate(
+          exactTarget,
+          templateId,
+          normalizeAdapterTimeout(timeoutMs),
+        ));
+      const expectedIdentity = {
+        "128": { recordType: "128", recordCode: "TL04" },
+        "778": { recordType: "778", recordCode: "ST310N" },
+        "131": { recordType: "131", recordCode: "T123" },
+        "396": { recordType: "396", recordCode: "T396" },
+      }[templateId];
+      const beforeIds = result.beforeRecords.map(({ recordId }) => recordId);
+      const afterIds = result.afterRecords.map(({ recordId }) => recordId);
+      if (
+        result.target.projectId !== exactTarget.projectId ||
+        result.target.pageId !== exactTarget.pageId ||
+        result.templateId !== templateId ||
+        result.publishedUnchanged !== true ||
+        result.afterRecords.length !== result.beforeRecords.length + 1 ||
+        new Set(beforeIds).size !== beforeIds.length ||
+        new Set(afterIds).size !== afterIds.length ||
+        result.createdRecord.recordType !== expectedIdentity.recordType ||
+        result.createdRecord.recordCode !== expectedIdentity.recordCode ||
+        !result.afterRecords.some(({ recordId }) => recordId === result.createdRecord.recordId) ||
+        result.beforeRecords.some(({ recordId }) => recordId === result.createdRecord.recordId) ||
+        result.beforeRecords.some((before) => !result.afterRecords.some(
+          (after) => after.recordId === before.recordId && jsonEqual(after, before),
+        ))
+      ) {
+        throw new BrowserAuthorityError(
+          "WRITE_IDENTITY_REJECTED",
+          "Known-template add did not return one exact created-record identity.",
+        );
+      }
+      const receipt = Object.freeze({
+        kind: "created_known_template_record" as const,
+        receiptId: operationId,
+        accountFingerprint: this.metadata.accountFingerprint,
+        target: Object.freeze({ ...exactTarget, recordId: result.createdRecord.recordId }),
+        templateId,
+        identity: Object.freeze({ ...result.createdRecord }),
+        beforeRecordIds: Object.freeze(result.beforeRecords.map(({ recordId }) => recordId)),
+        afterRecordIds: Object.freeze(result.afterRecords.map(({ recordId }) => recordId)),
+        consumed: false as const,
+      });
+      createdKnownTemplateRecordReceipts.add(receipt);
+      return receipt;
     });
   }
 
@@ -1307,7 +1936,7 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
     const exactTarget = exactPlainPageTarget(target);
     return this.#runAdapterOperation(async () => {
       this.#assertMutationSlotAvailable();
-      this.#guardPageTarget(exactTarget);
+      this.#assertChangePageTarget("page.lifecycle", exactTarget);
       const boundedTimeout = normalizeAdapterTimeout(timeoutMs);
       const source = await this.session.readEditorPage(exactTarget, boundedTimeout);
       if (
@@ -1322,13 +1951,17 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
           "Fixed page lifecycle requires one exact unpublished nonblank lab source page.",
         );
       }
-      this.assertFresh();
-      this.#consumeMutationSlot();
-      return this.session.runFixedPageLifecycle(exactTarget, boundedTimeout);
+      const { result } = await this.#dispatchMutation(() =>
+        this.session.runFixedPageLifecycle(exactTarget, boundedTimeout));
+      return result;
     });
   }
 
-  #guardPageTarget(target: LabPageTarget): void {
+  #assertReadPageTarget(target: LabPageTarget): void {
+    if (this.taskGuard !== undefined) {
+      this.taskGuard.assertRead(taskPageTarget(target));
+      return;
+    }
     try {
       assertLabPageTarget(this.config, target, this.binding.inventory);
     } catch (error) {
@@ -1340,9 +1973,13 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
     }
   }
 
-  #guardRecordTarget(target: LabRecordTarget): LabRecordTarget {
+  #assertReadRecordTarget(target: LabRecordTarget): void {
+    if (this.taskGuard !== undefined) {
+      this.taskGuard.assertRead(taskRecordTarget(target));
+      return;
+    }
     try {
-      return assertLabRecordTarget(this.config, target, this.binding.inventory);
+      assertLabRecordTarget(this.config, target, this.binding.inventory);
     } catch (error) {
       throw new BrowserAuthorityError(
         "TARGET_REJECTED",
@@ -1350,6 +1987,53 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
         { cause: error },
       );
     }
+  }
+
+  #assertReadElementTarget(target: LabRecordTarget, elementId: string): void {
+    if (!ZERO_ELEMENT_ID.test(elementId)) {
+      throw new BrowserAuthorityError("TARGET_REJECTED", "Zero element target is invalid.");
+    }
+    if (this.taskGuard !== undefined) {
+      this.taskGuard.assertRead(taskElementTarget(target, elementId));
+      return;
+    }
+    this.#assertReadRecordTarget(target);
+  }
+
+  #assertChangePageTarget(operation: ChangeOperation, target: LabPageTarget): void {
+    if (this.taskGuard !== undefined) {
+      this.taskGuard.assertChange(operation, taskPageTarget(target));
+      return;
+    }
+    this.#assertReadPageTarget(target);
+  }
+
+  #assertChangeRecordTarget(operation: ChangeOperation, target: LabRecordTarget): void {
+    if (this.taskGuard !== undefined) {
+      this.taskGuard.assertChange(operation, taskRecordTarget(target));
+      return;
+    }
+    this.#assertReadRecordTarget(target);
+  }
+
+  #assertChangeElementTarget(
+    operation: ChangeOperation,
+    target: LabRecordTarget,
+    elementId: string,
+  ): void {
+    if (this.taskGuard !== undefined) {
+      this.taskGuard.assertChange(operation, taskElementTarget(target, elementId));
+      return;
+    }
+    this.#assertReadRecordTarget(target);
+  }
+
+  #assertPublicationTarget(action: "publish" | "unpublish", target: LabPageTarget): void {
+    if (this.taskGuard !== undefined) {
+      this.taskGuard.assertPublication(action, taskPageTarget(target));
+      return;
+    }
+    this.#assertReadPageTarget(target);
   }
 
   #exactRecordIdentity(
@@ -1376,6 +2060,28 @@ class LoopbackBrowserAuthorityLease implements LoopbackBrowserAuthority {
     // never retried on this lease.
     this.#mutationSlotConsumed = true;
     return this.dependencies.randomId();
+  }
+
+  /**
+   * Single last-mile boundary shared by every remote mutation surface. A
+   * manager-owned task lease prevents successful clear/replace while the
+   * browser transaction can still issue one or more fixed remote writes.
+   */
+  async #dispatchMutation<T>(
+    dispatch: () => Promise<T>,
+    beforeDispatch: () => void = () => undefined,
+  ): Promise<{ readonly operationId: string; readonly result: T }> {
+    this.assertFresh();
+    const taskLease = this.taskGuard?.beginMutationDispatch();
+    try {
+      this.assertFresh();
+      const operationId = this.#consumeMutationSlot();
+      beforeDispatch();
+      const result = await dispatch();
+      return { operationId, result };
+    } finally {
+      taskLease?.release();
+    }
   }
 
   #assertMutationSlotAvailable(): void {
@@ -1444,13 +2150,16 @@ class LoopbackBrowserReadAuthorityLease implements LoopbackBrowserReadAuthority 
     private readonly session: AuthorityOwnedLoopbackBrowserSession,
     private readonly processLeaseToken: object,
     private readonly dependencies: LoopbackBrowserAuthorityDependencies,
+    private readonly taskGuard: TaskAuthorityGuard | undefined,
     leaseTtlMs: number,
   ) {
     const acquiredAtMs = dependencies.now();
     const bindingExpiry = Date.parse(binding.captureContext.expiresAt ?? "");
+    const taskExpiry = Date.parse(taskGuard?.receipt().expiresAt ?? "");
     this.#expiresAtMs = Math.min(
       acquiredAtMs + leaseTtlMs,
       Number.isFinite(bindingExpiry) ? bindingExpiry : acquiredAtMs,
+      Number.isFinite(taskExpiry) ? taskExpiry : acquiredAtMs + leaseTtlMs,
     );
     this.inventory = binding.inventory;
     this.metadata = Object.freeze({
@@ -1474,6 +2183,13 @@ class LoopbackBrowserReadAuthorityLease implements LoopbackBrowserReadAuthority 
         this.#readRecord(target, "zero_server", timeoutMs),
       readPageHeadCode: (target: LabPageTarget, timeoutMs?: number) =>
         this.#readPageHeadCode(target, timeoutMs),
+      revealExactRecordControl: (
+        target: LabRecordTarget,
+        controlKey: string,
+        timeoutMs?: number,
+      ) => this.#revealExactRecordControl(target, controlKey, timeoutMs),
+      readRenderedBlockLibrary: (target: LabPageTarget, timeoutMs?: number) =>
+        this.#readRenderedBlockLibrary(target, timeoutMs),
     });
   }
 
@@ -1534,7 +2250,7 @@ class LoopbackBrowserReadAuthorityLease implements LoopbackBrowserReadAuthority 
   ): Promise<ExactEditorPageSnapshot> {
     const exactTarget = exactPlainPageTarget(target);
     return this.#run(async () => {
-      assertClassifiedReadPageTarget(this.config, exactTarget, this.binding.inventory);
+      this.#assertReadPageTarget(exactTarget);
       return this.session.readEditorPage(exactTarget, normalizeAdapterTimeout(timeoutMs));
     });
   }
@@ -1546,7 +2262,7 @@ class LoopbackBrowserReadAuthorityLease implements LoopbackBrowserReadAuthority 
   ): Promise<ExactEditorRecordRead> {
     const exactTarget = exactPlainRecordTarget(target);
     return this.#run(async () => {
-      assertClassifiedReadPageTarget(this.config, exactTarget, this.binding.inventory);
+      this.#assertReadRecordTarget(exactTarget);
       const boundedTimeout = normalizeAdapterTimeout(timeoutMs);
       if (kind === "standard") {
         return this.session.readStandardSettings(exactTarget, boundedTimeout);
@@ -1562,7 +2278,7 @@ class LoopbackBrowserReadAuthorityLease implements LoopbackBrowserReadAuthority 
   ): Promise<ExactPageHeadCodeRead> {
     const exactTarget = exactPlainPageTarget(target);
     return this.#run(async () => {
-      assertClassifiedReadPageTarget(this.config, exactTarget, this.binding.inventory);
+      this.#assertReadPageTarget(exactTarget);
       const read = await this.session.readPageHeadCode(
         exactTarget,
         normalizeAdapterTimeout(timeoutMs),
@@ -1584,6 +2300,104 @@ class LoopbackBrowserReadAuthorityLease implements LoopbackBrowserReadAuthority 
     });
   }
 
+  async #revealExactRecordControl(
+    target: LabRecordTarget,
+    controlKey: string,
+    timeoutMs: number | undefined,
+  ): Promise<ExactRecordHoverControlReveal> {
+    if (!/^[A-Za-z][A-Za-z0-9]{0,63}$/u.test(controlKey)) {
+      throw new BrowserAuthorityError(
+        "TARGET_REJECTED",
+        "Record control key must be a bounded property identifier.",
+      );
+    }
+    const exactTarget = exactPlainRecordTarget(target);
+    return this.#run(async () => {
+      this.#assertReadRecordTarget(exactTarget);
+      const boundedTimeout = normalizeAdapterTimeout(timeoutMs);
+      const page = await this.session.readEditorPage(exactTarget, boundedTimeout);
+      const matches = page.records.filter((record) => record.recordId === exactTarget.recordId);
+      if (
+        page.target.projectId !== exactTarget.projectId ||
+        page.target.pageId !== exactTarget.pageId ||
+        matches.length !== 1
+      ) {
+        throw new BrowserAuthorityError(
+          "WRITE_IDENTITY_REJECTED",
+          "Hover-control readback did not prove one exact record identity.",
+        );
+      }
+      const identity = matches[0]!;
+      let reveal: ExactRecordHoverControlReveal;
+      try {
+        reveal = await this.session.revealExactRecordControl(
+          exactTarget,
+          identity,
+          controlKey,
+          boundedTimeout,
+        );
+      } catch (error) {
+        throwRecordControlProbeError(error);
+      }
+      if (
+        reveal.target.projectId !== exactTarget.projectId ||
+        reveal.target.pageId !== exactTarget.pageId ||
+        reveal.target.recordId !== exactTarget.recordId ||
+        reveal.ownerRecordId !== exactTarget.recordId ||
+        reveal.controlKey !== controlKey ||
+        reveal.connected !== true ||
+        reveal.identity.recordId !== identity.recordId ||
+        reveal.identity.recordType !== identity.recordType ||
+        reveal.identity.recordCode !== identity.recordCode ||
+        reveal.identity.recordCategory !== identity.recordCategory
+      ) {
+        throw new BrowserAuthorityError(
+          "WRITE_IDENTITY_REJECTED",
+          "Hover-revealed control evidence is not owned by the exact record identity.",
+        );
+      }
+      return Object.freeze({
+        ...reveal,
+        target: exactPlainRecordTarget(reveal.target),
+        identity: Object.freeze({ ...reveal.identity }),
+      });
+    });
+  }
+
+  async #readRenderedBlockLibrary(
+    target: LabPageTarget,
+    timeoutMs: number | undefined,
+  ): Promise<RenderedBlockLibraryIndex> {
+    const exactTarget = exactPlainPageTarget(target);
+    return this.#run(async () => {
+      this.#assertReadPageTarget(exactTarget);
+      const index = await this.session.readRenderedBlockLibrary(
+        exactTarget,
+        normalizeAdapterTimeout(timeoutMs),
+      );
+      if (
+        index.target.projectId !== exactTarget.projectId ||
+        index.target.pageId !== exactTarget.pageId ||
+        index.mutationIssued !== false ||
+        index.templates.length === 0 ||
+        index.templates.length > 2_000 ||
+        index.categories.length > 100 ||
+        index.categories.some((category) => category.trim() !== category || category.length < 1 || category.length > 128)
+      ) {
+        throw new BrowserAuthorityError(
+          "WRITE_IDENTITY_REJECTED",
+          "Rendered block-library inspection did not remain bound to the exact page.",
+        );
+      }
+      return Object.freeze({
+        target: exactPlainPageTarget(index.target),
+        categories: Object.freeze([...index.categories]),
+        templates: Object.freeze(index.templates.map((template) => Object.freeze({ ...template }))),
+        mutationIssued: false,
+      });
+    });
+  }
+
   async #run<T>(operation: () => Promise<T>): Promise<T> {
     this.assertFresh();
     if (this.#operationActive) {
@@ -1599,6 +2413,22 @@ class LoopbackBrowserReadAuthorityLease implements LoopbackBrowserReadAuthority 
     } finally {
       this.#operationActive = false;
     }
+  }
+
+  #assertReadPageTarget(target: LabPageTarget): void {
+    if (this.taskGuard !== undefined) {
+      this.taskGuard.assertRead(taskPageTarget(target));
+      return;
+    }
+    assertClassifiedReadPageTarget(this.config, target, this.binding.inventory);
+  }
+
+  #assertReadRecordTarget(target: LabRecordTarget): void {
+    if (this.taskGuard !== undefined) {
+      this.taskGuard.assertRead(taskRecordTarget(target));
+      return;
+    }
+    assertClassifiedReadPageTarget(this.config, target, this.binding.inventory);
   }
 }
 
@@ -1617,6 +2447,7 @@ export async function acquireLoopbackBrowserAuthority(
       "Another process-local browser authority lease is active.",
     );
   }
+  const { leaseTtlMs, taskGuard, ...captureOptions } = options;
   const processLeaseToken = Object.freeze({ id: dependencies.randomId() });
   activeProcessLeaseToken = processLeaseToken;
   let session: AuthorityOwnedLoopbackBrowserSession | null = null;
@@ -1629,7 +2460,7 @@ export async function acquireLoopbackBrowserAuthority(
         "Opened browser session does not belong to the selected exact root target.",
       );
     }
-    const binding = await dependencies.captureBinding(config, session, options);
+    const binding = await dependencies.captureBinding(config, session, captureOptions);
     if (binding.status !== "BOUND") {
       throw new BrowserAuthorityError(
         "BINDING_BLOCKED",
@@ -1646,13 +2477,15 @@ export async function acquireLoopbackBrowserAuthority(
         "Trusted binding is not a fresh process-local capture from the selected exact root session.",
       );
     }
+    assertTaskGuardBinding(taskGuard, binding);
     const authority = new LoopbackBrowserAuthorityLease(
       binding,
       config,
       session,
       processLeaseToken,
       dependencies,
-      normalizeLeaseTtl(options.leaseTtlMs),
+      taskGuard,
+      normalizeLeaseTtl(leaseTtlMs),
     );
     session = null;
     return authority;
@@ -1700,6 +2533,7 @@ export async function acquireLoopbackBrowserReadAuthority(
       "Another process-local browser authority lease is active.",
     );
   }
+  const { leaseTtlMs, taskGuard, ...captureOptions } = options;
   const processLeaseToken = Object.freeze({ id: dependencies.randomId() });
   activeProcessLeaseToken = processLeaseToken;
   let session: AuthorityOwnedLoopbackBrowserSession | null = null;
@@ -1712,7 +2546,7 @@ export async function acquireLoopbackBrowserReadAuthority(
         "Opened browser session does not belong to the selected exact root target.",
       );
     }
-    const binding = await dependencies.captureBinding(config, session, options);
+    const binding = await dependencies.captureBinding(config, session, captureOptions);
     if (binding.status !== "BOUND") {
       throw new BrowserAuthorityError("BINDING_BLOCKED", `${binding.code}: ${binding.message}`);
     }
@@ -1726,13 +2560,15 @@ export async function acquireLoopbackBrowserReadAuthority(
         "Trusted binding is not a fresh process-local capture from the selected exact root session.",
       );
     }
+    assertTaskGuardBinding(taskGuard, binding);
     const authority = new LoopbackBrowserReadAuthorityLease(
       binding,
       config,
       session,
       processLeaseToken,
       dependencies,
-      normalizeLeaseTtl(options.leaseTtlMs),
+      taskGuard,
+      normalizeLeaseTtl(leaseTtlMs),
     );
     session = null;
     return authority;

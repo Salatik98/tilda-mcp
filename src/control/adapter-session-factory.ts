@@ -10,16 +10,52 @@ import type {
   ZeroRecordData,
 } from "../adapters/session.js";
 import type { PageLifecycleTransport } from "../adapters/page-lifecycle.js";
+import type {
+  KnownTemplateAddTransport,
+  KnownTemplateId,
+  ReferencePageTransport,
+} from "../adapters/reference-page-lifecycle.js";
 import type { ElementTarget, PageTarget, RecordTarget } from "../core/contracts.js";
 import { TildaEngineError } from "../core/contracts.js";
+import { TaskAuthorityManager } from "../core/task-authority-manager.js";
+import type { TaskAuthorityGuard } from "../core/task-authority.js";
 import type { LabPageTarget, LabRecordTarget, ResearchConfig } from "../research/config.js";
-import type { ExactEditorRecordRead } from "../research/browser-session.js";
+import type {
+  ExactEditorRecordRead,
+  KnownObservedTemplateId,
+} from "../research/browser-session.js";
+import {
+  inspectStandardRecord,
+  type StandardRecordInspection,
+} from "../adapters/standard-schema.js";
 import { canonicalHash } from "../research/hash.js";
 import {
   withLoopbackBrowserAuthority,
   type FixedDispatchReceipt,
+  type CreatedReferencePageReceipt,
   type LoopbackBrowserAuthority,
+  type AcquireLoopbackBrowserAuthorityOptions,
 } from "./browser-authority.js";
+
+export type TaskAuthorityGuardProvider =
+  | TaskAuthorityManager
+  | (() => TaskAuthorityGuard | null);
+
+function taskAuthorityOptions(
+  provider: TaskAuthorityGuardProvider | undefined,
+): AcquireLoopbackBrowserAuthorityOptions {
+  if (provider === undefined) return {};
+  const guard = provider instanceof TaskAuthorityManager
+    ? provider.requireGuard()
+    : provider();
+  if (guard === null) {
+    throw new TildaEngineError(
+      "TASK_AUTHORITY_REQUIRED",
+      "The configured task-authority provider has no active guard.",
+    );
+  }
+  return { taskGuard: guard };
+}
 
 function labPage(target: PageTarget | RecordTarget | ElementTarget): LabPageTarget {
   return { projectId: target.projectId, pageId: target.pageId };
@@ -100,7 +136,11 @@ function cleanZeroModel(value: unknown): Record<string, unknown> {
 
 function recordFromRead(
   read: ExactEditorRecordRead,
-  options: { requireWritableField?: boolean } = {},
+  options: {
+    requireWritableField?: boolean;
+    mergeRenderedFields?: boolean;
+    rejectAmbiguousRenderedFields?: boolean;
+  } = {},
 ): Record<string, unknown> {
   const payload = object(read.payload, "Tilda response");
   if (!("tpl" in payload)) {
@@ -117,6 +157,44 @@ function recordFromRead(
     );
   }
   const cloned = structuredClone(record);
+  if (options.mergeRenderedFields === true) {
+    if (options.rejectAmbiguousRenderedFields === true && (read.ambiguousRenderedFields?.length ?? 0) > 0) {
+      throw new TildaEngineError(
+        "ADAPTER_RESPONSE_REJECTED",
+        "Tilda standard read contains duplicate rendered field identities.",
+      );
+    }
+    const renderedFields = [...(read.renderedFields ?? [])];
+    if (
+      read.writableField !== undefined &&
+      !renderedFields.some(({ name }) => name === read.writableField!.name)
+    ) {
+      renderedFields.push({
+        name: read.writableField.name,
+        value: read.writableField.value,
+        representation: "rendered_inner_html",
+      });
+    }
+    for (const field of renderedFields) {
+      if (
+        !/^[A-Za-z][A-Za-z0-9_:-]{0,127}$/u.test(field.name) ||
+        typeof field.value !== "string" ||
+        field.representation !== "rendered_inner_html"
+      ) {
+        throw new TildaEngineError(
+          "ADAPTER_RESPONSE_REJECTED",
+          "Tilda standard read contains an invalid rendered field.",
+        );
+      }
+      if (Object.hasOwn(cloned, field.name) && cloned[field.name] !== field.value) {
+        throw new TildaEngineError(
+          "ADAPTER_RESPONSE_REJECTED",
+          "Tilda settings and rendered standard field disagree.",
+        );
+      }
+      cloned[field.name] = field.value;
+    }
+  }
   if (options.requireWritableField === true) {
     const writable = read.writableField;
     const expectedField =
@@ -182,13 +260,41 @@ export class AuthorityBoundAdapterSession implements BoundAdapterSession {
   async readStandard(target: RecordTarget): Promise<StandardRecordData> {
     const read = await this.authority.adapter.readStandardSettings(labRecord(target));
     return {
-      record: recordFromRead(read, { requireWritableField: true }),
+      record: recordFromRead(read, {
+        mergeRenderedFields: true,
+      }),
       recordType: read.identity.recordType,
       recordCode: read.identity.recordCode,
+      ambiguousFields: [...(read.ambiguousRenderedFields ?? [])],
     };
   }
 
-  async writeStandard(target: RecordTarget, field: "title" | "buttontitle", value: string) {
+  async inspectStandard(target: RecordTarget): Promise<StandardRecordData & {
+    readonly inspection: StandardRecordInspection;
+  }> {
+    const read = await this.authority.adapter.readStandardSettings(labRecord(target));
+    const record = recordFromRead(read, { mergeRenderedFields: true });
+    return {
+      record,
+      recordType: read.identity.recordType,
+      recordCode: read.identity.recordCode,
+      inspection: inspectStandardRecord(read.identity.recordType, read.identity.recordCode, record),
+    };
+  }
+
+  async revealRecordControl(target: RecordTarget, controlKey: string) {
+    return this.authority.adapter.revealExactRecordControl(labRecord(target), controlKey);
+  }
+
+  async inspectBlockLibrary(target: PageTarget) {
+    return this.authority.adapter.readRenderedBlockLibrary(labPage(target));
+  }
+
+  async preflightKnownTemplateAdd(target: PageTarget, templateId: KnownObservedTemplateId) {
+    return this.authority.adapter.preflightKnownTemplateAdd(labPage(target), templateId);
+  }
+
+  async writeStandard(target: RecordTarget, field: string, value: string) {
     return dispatch(await this.authority.adapter.writeStandard(labRecord(target), field, value));
   }
 
@@ -210,7 +316,10 @@ export class AuthorityBoundAdapterSession implements BoundAdapterSession {
   }
 
   async readZero(target: RecordTarget | ElementTarget): Promise<ZeroRecordData> {
-    const read = await this.authority.adapter.readZeroModel(labRecord(target));
+    const exactRecord = labRecord(target);
+    const read = target.kind === "element"
+      ? await this.authority.adapter.readZeroModel(exactRecord, undefined, target.elementId)
+      : await this.authority.adapter.readZeroModel(exactRecord);
     if (read.identity.recordType !== "396" || read.identity.recordCode !== "T396") {
       throw new TildaEngineError("RECORD_IDENTITY_MISMATCH", "Exact record is not T396 / 396.");
     }
@@ -219,9 +328,15 @@ export class AuthorityBoundAdapterSession implements BoundAdapterSession {
   }
 
   async writeZero(target: RecordTarget | ElementTarget, cleanModel: unknown): Promise<DispatchReceipt> {
-    return dispatch(
-      await this.authority.adapter.writeZeroModel(labRecord(target), cleanModel),
-    );
+    const exactRecord = labRecord(target);
+    return dispatch(target.kind === "element"
+      ? await this.authority.adapter.writeZeroModel(
+          exactRecord,
+          cleanModel,
+          undefined,
+          target.elementId,
+        )
+      : await this.authority.adapter.writeZeroModel(exactRecord, cleanModel));
   }
 
   async readPageSettings(target: PageTarget): Promise<PageSettingsData> {
@@ -307,7 +422,10 @@ export class AuthorityBoundAdapterSession implements BoundAdapterSession {
 }
 
 export class LoopbackAdapterSessionFactory implements AdapterSessionFactory {
-  constructor(readonly config: ResearchConfig) {}
+  constructor(
+    readonly config: ResearchConfig,
+    readonly taskAuthority?: TaskAuthorityGuardProvider,
+  ) {}
 
   async withSession<T>(action: (session: BoundAdapterSession) => Promise<T>): Promise<T> {
     return withLoopbackBrowserAuthority(this.config, async (authority) =>
@@ -317,13 +435,17 @@ export class LoopbackAdapterSessionFactory implements AdapterSessionFactory {
           ? this.config.publicTestDomains[0]
           : undefined,
       )),
+      taskAuthorityOptions(this.taskAuthority),
     );
   }
 }
 
 /** One opaque EXP-16 transaction; no generic duplicate/sort/delete methods escape. */
 export class LoopbackPageLifecycleTransport implements PageLifecycleTransport {
-  constructor(readonly config: ResearchConfig) {}
+  constructor(
+    readonly config: ResearchConfig,
+    readonly taskAuthority?: TaskAuthorityGuardProvider,
+  ) {}
 
   async duplicateVerifyReorderRestoreCleanup(target: PageTarget) {
     return withLoopbackBrowserAuthority(this.config, async (authority) => {
@@ -351,6 +473,80 @@ export class LoopbackPageLifecycleTransport implements PageLifecycleTransport {
           exactBaselineRestored: evidence.restored.exactBaselineRestored,
         },
       };
-    });
+    }, taskAuthorityOptions(this.taskAuthority));
+  }
+}
+
+type ResearchConfigProvider = ResearchConfig | (() => ResearchConfig);
+
+function currentConfig(provider: ResearchConfigProvider): ResearchConfig {
+  return typeof provider === "function" ? provider() : provider;
+}
+
+/**
+ * Create and cleanup intentionally acquire separate authorities. A provider is
+ * accepted so cleanup can use the freshly rebound post-create inventory.
+ */
+export class LoopbackReferencePageTransport implements ReferencePageTransport {
+  constructor(
+    readonly config: ResearchConfigProvider,
+    readonly taskAuthority?: TaskAuthorityGuardProvider,
+  ) {}
+
+  async createFromReference(source: PageTarget) {
+    return withLoopbackBrowserAuthority(currentConfig(this.config), async (authority) => {
+      const token = await authority.adapter.createPageFromReference(labPage(source));
+      return {
+        token,
+        evidence: {
+          source: { ...source },
+          created: { kind: "page" as const, ...token.createdTarget },
+          baselinePageIds: token.baselineActivePageIds,
+          baselinePageOrder: token.baselinePageOrder,
+          createdPageIds: token.createdActivePageIds,
+          createdPageOrder: token.createdPageOrder,
+          sourceRecordIds: token.sourceRecords.map(({ recordId }) => recordId),
+          createdRecordIds: token.createdRecords.map(({ recordId }) => recordId),
+          recordFamilyParity: true as const,
+          createdUnpublished: true as const,
+        },
+      };
+    }, taskAuthorityOptions(this.taskAuthority));
+  }
+
+  async cleanupCreatedReference(token: object) {
+    return withLoopbackBrowserAuthority(currentConfig(this.config), async (authority) => {
+      const receipt = token as CreatedReferencePageReceipt;
+      const cleaned = await authority.adapter.cleanupReferencePage(receipt);
+      return {
+        source: { kind: "page" as const, ...cleaned.sourceTarget },
+        removedPageId: cleaned.removedPageId,
+        activePageIds: cleaned.activePageIds,
+        pageOrder: cleaned.pageOrder,
+        removedPageAbsent: true as const,
+        sourceRecordIds: cleaned.sourceRecords.map(({ recordId }) => recordId),
+      };
+    }, taskAuthorityOptions(this.taskAuthority));
+  }
+}
+
+export class LoopbackKnownTemplateAddTransport implements KnownTemplateAddTransport {
+  constructor(
+    readonly config: ResearchConfigProvider,
+    readonly taskAuthority?: TaskAuthorityGuardProvider,
+  ) {}
+
+  async addKnownTemplate(page: PageTarget, templateId: KnownTemplateId) {
+    return withLoopbackBrowserAuthority(currentConfig(this.config), async (authority) => {
+      const token = await authority.adapter.addKnownTemplate(labPage(page), templateId);
+      return {
+        token,
+        created: { kind: "record" as const, ...token.target },
+        recordType: token.identity.recordType,
+        recordCode: token.identity.recordCode,
+        beforeRecordIds: token.beforeRecordIds,
+        afterRecordIds: token.afterRecordIds,
+      };
+    }, taskAuthorityOptions(this.taskAuthority));
   }
 }

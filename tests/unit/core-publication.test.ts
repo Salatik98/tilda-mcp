@@ -13,6 +13,11 @@ import {
   PublicPageVerifier,
 } from "../../src/core/publication.js";
 import { ChangeSetStore } from "../../src/core/store.js";
+import {
+  TaskAuthorityManager,
+  type MintTaskAuthorityInput,
+} from "../../src/core/task-authority-manager.js";
+import { TaskScopedPublicationController } from "../../src/core/task-authority.js";
 
 const target = {
   kind: "page" as const,
@@ -44,6 +49,7 @@ class PublicationSession {
   unpublishReadsAfterDispatch = 0;
   unpublishDispatched = false;
   mode: "success" | "throw-before" | "throw-after" = "success";
+  afterRead: (() => void) | undefined;
 
   readonly factory: AdapterSessionFactory = {
     withSession: async <T>(action: (session: BoundAdapterSession) => Promise<T>) =>
@@ -66,7 +72,9 @@ class PublicationSession {
           this.data = { ...this.data, published: "" };
         }
         if (this.unpublishDispatched) this.unpublishReadsAfterDispatch += 1;
-        return structuredClone(this.data);
+        const result = structuredClone(this.data);
+        this.afterRead?.();
+        return result;
       },
       publish: async () => {
         this.publishCalls += 1;
@@ -214,19 +222,91 @@ describe("PublicationController durable idempotency", () => {
       failureCode: "PUBLICATION_PREVIOUS_ATTEMPT_UNCHANGED",
     });
   });
+
+  it("keeps actual publication read, dispatch, and reconciliation under one task lineage", async () => {
+    let nextId = 1;
+    const authority = new TaskAuthorityManager({
+      now: () => new Date("2026-08-20T04:00:00.000Z"),
+      createTaskId: () =>
+        `018f0000-0000-7000-8000-${String(nextId++).padStart(12, "0")}`,
+    });
+    const authorityInput: MintTaskAuthorityInput = {
+      taskDescription: "Publish one exact page and reconcile the editor state",
+      mode: "production",
+      observeTargets: [],
+      writeTargets: [target],
+      allowedOperations: [],
+      publication: { actions: ["publish"], targets: [target] },
+      binding: {
+        accountFingerprint: "a".repeat(64),
+        inventoryHash: "b".repeat(64),
+      },
+      ttlMs: 60_000,
+    };
+    const initial = authority.mint(authorityInput);
+    const transitionErrors: unknown[] = [];
+    let firstRead = true;
+    session.afterRead = () => {
+      if (!firstRead) return;
+      firstRead = false;
+      expect(session.publishCalls).toBe(0);
+      expect(authority.currentReceipt()).toEqual(initial);
+      try {
+        authority.replace({ ...authorityInput, taskDescription: "replacement task" });
+      } catch (error) {
+        transitionErrors.push(error);
+      }
+      try {
+        authority.clear();
+      } catch (error) {
+        transitionErrors.push(error);
+      }
+      expect(authority.currentReceipt()).toEqual(initial);
+    };
+    const scoped = new TaskScopedPublicationController(
+      new PublicationController(session.factory, store, { delaysMs: [] }),
+      authority.requireGuard(),
+    );
+
+    await expect(scoped.execute("publish", target, {
+      dryRun: false,
+      idempotencyKey: "scoped-publication-1",
+    })).resolves.toMatchObject({
+      action: "publish",
+      target,
+      stateChanged: true,
+      dryRun: false,
+    });
+    expect(session.publishCalls).toBe(1);
+    expect(transitionErrors).toHaveLength(2);
+    for (const error of transitionErrors) {
+      expect(error).toMatchObject({ code: "TASK_AUTHORITY_EXECUTION_IN_PROGRESS" });
+    }
+    expect(authority.currentReceipt()).toEqual(initial);
+    expect(authority.replace({ ...authorityInput, taskDescription: "replacement task" })).toMatchObject({
+      taskId: "018f0000-0000-7000-8000-000000000002",
+    });
+  });
 });
 
 describe("PublicPageVerifier", () => {
+  it("allows an empty public-domain allowlist but fails closed before fetch", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const verifier = new PublicPageVerifier([]);
+
+    await expect(verifier.verify("https://example.test/page")).rejects.toMatchObject({
+      code: "PUBLIC_DOMAIN_NOT_ALLOWLISTED",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("rejects unsafe allowlists and URL ambiguity before fetch", async () => {
     expect(() => new PublicPageVerifier(["localhost"])).toThrow(
       expect.objectContaining({ code: "INVALID_PUBLIC_DOMAIN_ALLOWLIST" }),
     );
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    const unconfigured = new PublicPageVerifier([]);
-    await expect(unconfigured.verify("https://lab.example.com/")).rejects.toMatchObject({
-      code: "PUBLIC_DOMAIN_NOT_ALLOWLISTED",
-    });
     const verifier = new PublicPageVerifier(["lab.example.com"]);
 
     await expect(verifier.verify("https://lab.example.com/page?token=secret")).rejects.toMatchObject({

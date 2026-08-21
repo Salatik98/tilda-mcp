@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { PublicationController, PublicPageVerifier } from "../../src/core/publication.js";
 import type { TildaChangeSetEngine } from "../../src/core/engine.js";
 import type { ResearchConfig } from "../../src/research/config.js";
+import { hashLiveInventory } from "../../src/research/config.js";
 import type { PageLifecycleController } from "../../src/adapters/page-lifecycle.js";
+import { TaskAuthorityManager } from "../../src/core/task-authority-manager.js";
+import type { TrustedBindingCapture } from "../../src/research/inventory.js";
 import {
   boundedQueryPayload,
   EngineTildaMcpService,
@@ -19,17 +22,43 @@ function service(options: {
   publication?: Partial<PublicationController>;
   publicVerifier?: Partial<PublicPageVerifier>;
   pageLifecycle?: Partial<PageLifecycleController>;
+  binding?: TrustedBindingCapture;
 } = {}): EngineTildaMcpService {
   const engine = {
     capabilities: () => [
       { adapter: "standard-field-v1", capabilities: ["standard.field.patch"] },
-      { adapter: "zero-model-v1", capabilities: ["zero.leaf.patch"] },
+      {
+        adapter: "zero-model-v1",
+        capabilities: ["zero.leaf.patch", "zero.property.patch", "zero.element.clone"],
+      },
     ],
   } as unknown as TildaChangeSetEngine;
   const config = {
     labPageTargets: [{ projectId: pageTarget.projectId, pageId: pageTarget.pageId }],
     publicTestDomains: ["example.test"],
   } as unknown as ResearchConfig;
+  const defaultInventory = {
+    accountFingerprint: "a".repeat(64),
+    projectIds: [pageTarget.projectId],
+    pageOwnership: { [pageTarget.projectId]: [pageTarget.pageId] },
+  };
+  const binding = options.binding ?? {
+    status: "BOUND" as const,
+    capturedAt: "2026-08-20T04:00:00.000Z",
+    source: "trusted_same_session_cdp" as const,
+    route: "/projects/" as const,
+    accountFingerprint: "a".repeat(64),
+    inventoryHash: hashLiveInventory(defaultInventory),
+    inventory: defaultInventory,
+    projectCount: 1,
+    pageCount: 1,
+    captureContext: { cdpTargetId: "target", expiresAt: null },
+    privacy: {
+      rawAccountIdPersisted: false as const,
+      titlesOrContentPersisted: false as const,
+      cookiesOrSessionDataPersisted: false as const,
+    },
+  };
   return new EngineTildaMcpService(
     config,
     engine,
@@ -37,6 +66,10 @@ function service(options: {
     options.publicVerifier as PublicPageVerifier,
     undefined,
     options.pageLifecycle as PageLifecycleController,
+    null,
+    null,
+    new TaskAuthorityManager(),
+    async () => binding,
   );
 }
 
@@ -45,6 +78,8 @@ describe("MCP engine service safety", () => {
     const result = await service().execute("tilda_capabilities", {});
     const capabilities = (result.verification?.capabilities ?? []) as Array<Record<string, unknown>>;
     const zero = capabilities.find((entry) => entry.capability === "zero.leaf.patch");
+    const zeroProperty = capabilities.find((entry) => entry.capability === "zero.property.patch");
+    const zeroClone = capabilities.find((entry) => entry.capability === "zero.element.clone");
     const publication = capabilities.find((entry) => entry.capability === "page.publish");
     const lifecycle = capabilities.find(
       (entry) => entry.capability === "page.lifecycle.duplicate_verify_reorder_restore_cleanup",
@@ -52,6 +87,18 @@ describe("MCP engine service safety", () => {
 
     expect(result).toMatchObject({ ok: true, code: "CAPABILITIES_PARTIAL" });
     expect(zero).toMatchObject({
+      status: "AVAILABLE_WITH_FRESH_AUTHORITY",
+      executionAvailable: true,
+      registeredInEngine: true,
+    });
+    expect(zeroProperty).toMatchObject({
+      adapter: "zero-model-v1",
+      status: "AVAILABLE_WITH_FRESH_AUTHORITY",
+      executionAvailable: true,
+      registeredInEngine: true,
+    });
+    expect(zeroClone).toMatchObject({
+      adapter: "zero-model-v1",
       status: "AVAILABLE_WITH_FRESH_AUTHORITY",
       executionAvailable: true,
       registeredInEngine: true,
@@ -95,6 +142,21 @@ describe("MCP engine service safety", () => {
       publicVerifier: { verify },
     });
 
+    const unauthorized = await mcp.execute("tilda_unpublish", {
+      target: pageTarget,
+      dryRun: true,
+      idempotencyKey: "mcp-unpublish-idempotency-0",
+    });
+    const authorization = await mcp.execute("tilda_authorize_task", {
+      taskDescription: "Unpublish the exact test page and verify it",
+      mode: "production",
+      observeTargets: [],
+      writeTargets: [pageTarget],
+      allowedOperations: [],
+      publication: { actions: ["unpublish"], targets: [pageTarget] },
+      ttlMs: 60_000,
+    });
+
     const unpublish = await mcp.execute("tilda_unpublish", {
       target: pageTarget,
       dryRun: true,
@@ -102,11 +164,14 @@ describe("MCP engine service safety", () => {
     });
     const verifyLive = await mcp.execute("tilda_verify_live", { target: pageTarget });
     const lifecycle = await mcp.execute("tilda_page_lifecycle", {
+      action: "fixed_roundtrip",
       target: pageTarget,
       dryRun: true,
       idempotencyKey: "mcp-page-lifecycle-idempotency-1",
     });
 
+    expect(unauthorized).toMatchObject({ ok: false, code: "TASK_AUTHORITY_REQUIRED" });
+    expect(authorization).toMatchObject({ ok: true, code: "TASK_AUTHORIZED" });
     expect(unpublish).toMatchObject({
       ok: true,
       code: "DRY_RUN",

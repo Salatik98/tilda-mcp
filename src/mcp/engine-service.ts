@@ -1,36 +1,180 @@
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import { PageLifecycleController } from "../adapters/page-lifecycle.js";
 import { PageHeadCodeAdapter } from "../adapters/page-head-code.js";
 import { PageSettingsAdapter } from "../adapters/page-settings.js";
 import { StaticAdapterRegistry } from "../adapters/registry.js";
 import { StandardFieldAdapter } from "../adapters/standard.js";
 import { T123CodeAdapter } from "../adapters/t123.js";
+import { extractT123ExternalDependencies } from "../adapters/t123-code-helper.js";
 import { ZeroModelAdapter } from "../adapters/zero.js";
+import {
+  KnownTemplateAddController,
+  ReferencePageLifecycleController,
+  type KnownTemplateId,
+  type ReferencePageReceipt,
+} from "../adapters/reference-page-lifecycle.js";
 import {
   decodeT123Once,
   LoopbackAdapterSessionFactory,
+  LoopbackKnownTemplateAddTransport,
   LoopbackPageLifecycleTransport,
+  LoopbackReferencePageTransport,
 } from "../control/adapter-session-factory.js";
 import { withLoopbackBrowserReadAuthority } from "../control/browser-authority.js";
-import type { ChangeRequest, ExactTarget, PageTarget } from "../core/contracts.js";
-import { TildaEngineError } from "../core/contracts.js";
+import type { ChangeOperation, ChangeRequest, ExactTarget, PageTarget } from "../core/contracts.js";
+import { CHANGE_OPERATIONS, TildaEngineError } from "../core/contracts.js";
 import { TildaChangeSetEngine } from "../core/engine.js";
 import { PublicationController, PublicPageVerifier } from "../core/publication.js";
 import { ChangeSetStore } from "../core/store.js";
+import { TaskScopedReferencePageLifecycleController } from "../core/task-authority-reference.js";
+import {
+  TaskAuthorityManager,
+  type MintTaskAuthorityInput,
+} from "../core/task-authority-manager.js";
+import {
+  TaskScopedChangeSetEngine,
+  TaskScopedPublicationController,
+  type TaskAuthorityGuard,
+  type TaskPublicationGrant,
+} from "../core/task-authority.js";
 import { canonicalHash } from "../research/hash.js";
-import { captureTrustedLiveBinding } from "../research/inventory.js";
+import {
+  captureTrustedLiveBinding,
+  type TrustedBindingCapture,
+  type TrustedBindingEstablished,
+} from "../research/inventory.js";
 import { loadConfig, type ResearchConfig } from "../research/config.js";
 import { getTildaStatus } from "../research/status.js";
+import { TypedAuditRunner } from "../learning/audit.js";
+import {
+  AdapterSessionCapabilityLearningProvider,
+  CapabilityLearningWorkflow,
+  FileCapabilityLearningExecutionJournal,
+  FileCapabilityRecipeRegistry,
+  LoopbackTildaAuditProvider,
+  type TildaAuditAuthorityRunner,
+} from "../learning/index.js";
+import type {
+  AuditRequest,
+  LearnCapabilityRequest,
+  TildaAuditProvider,
+} from "../learning/contracts.js";
+import type { CapabilityLearningWorkflow as LearningWorkflow } from "../learning/workflow.js";
 import type { TildaMcpResult, TildaMcpTarget, TildaMcpToolName } from "./protocol.js";
 import type { TildaMcpService } from "./service.js";
+import {
+  executeTargetDiscoveryQuery,
+  isTargetDiscoveryQuery,
+  type TargetDiscoveryQuery,
+} from "./target-discovery-query.js";
 
 interface QueryInput {
   query:
+    | TargetDiscoveryQuery
     | { kind: "project" | "page"; target: ExactTarget }
     | { kind: "page_head_code"; target: ExactTarget; includePayload?: boolean }
+    | { kind: "record_control"; target: ExactTarget; controlKey: "contentButton" }
     | { kind: "record" | "element"; target: ExactTarget; includePayload?: boolean }
     | { kind: "changeset"; changeSetId: string }
     | { kind: "snapshot"; snapshotId: string };
+}
+
+type TrustedBindingCaptureProvider = (
+  config: ResearchConfig,
+) => Promise<TrustedBindingCapture>;
+
+interface CurrentTaskAuthority {
+  readonly guard: TaskAuthorityGuard;
+  readonly binding: TrustedBindingEstablished;
+}
+
+interface StructuralJournalEntry {
+  readonly intentHash: string;
+  state: "PENDING" | "SUCCEEDED" | "FAILED";
+  result?: TildaMcpResult;
+}
+
+function structuralKeyHash(key: string): string {
+  return createHash("sha256")
+    .update("tilda-mcp-structural-idempotency-v1\0")
+    .update(key, "utf8")
+    .digest("hex");
+}
+
+function exactPageOf(target: ExactTarget): { readonly projectId: string; readonly pageId: string } | null {
+  return target.kind === "project"
+    ? null
+    : { projectId: target.projectId, pageId: target.pageId };
+}
+
+function assertDedicatedCopyTestTargets(
+  config: ResearchConfig,
+  binding: TrustedBindingEstablished,
+  targets: readonly ExactTarget[],
+): void {
+  const labProjects = config.labProjectIds ?? [];
+  const labPages = config.labPageTargets ?? [];
+  const protectedProjects = config.readOnlyProjectIds ?? [];
+  const invalid = targets.some((target) => {
+    if (target.kind === "project") {
+      return !labProjects.includes(target.projectId) ||
+        protectedProjects.includes(target.projectId) ||
+        !binding.inventory.projectIds.includes(target.projectId) ||
+        binding.inventory.pageOwnership[target.projectId] === undefined;
+    }
+    const page = exactPageOf(target);
+    return page === null ||
+      !labProjects.includes(page.projectId) ||
+      protectedProjects.includes(page.projectId) ||
+      !labPages.some(
+        (candidate) => candidate.projectId === page.projectId && candidate.pageId === page.pageId,
+      ) ||
+      !binding.inventory.projectIds.includes(page.projectId) ||
+      !binding.inventory.pageOwnership[page.projectId]?.includes(page.pageId);
+  });
+  if (targets.length === 0 || invalid) {
+    throw new TildaEngineError(
+      "TASK_COPY_PROVENANCE_REQUIRED",
+      "Copy-test writes require exact configured lab projects/pages present in the fresh bound inventory.",
+    );
+  }
+}
+
+function assertTargetsInFreshInventory(
+  binding: TrustedBindingEstablished,
+  targets: readonly ExactTarget[],
+): void {
+  const missing = targets.some((target) => {
+    if (!binding.inventory.projectIds.includes(target.projectId)) return true;
+    if (target.kind === "project") return false;
+    return !binding.inventory.pageOwnership[target.projectId]?.includes(target.pageId);
+  });
+  if (missing) {
+    throw new TildaEngineError(
+      "TASK_TARGET_NOT_IN_INVENTORY",
+      "Task scopes must belong to the fresh bound project/page inventory.",
+    );
+  }
+}
+
+function assertWriteTargetsOutsidePermanentSourceCorpus(
+  config: ResearchConfig,
+  targets: readonly ExactTarget[],
+): void {
+  if (targets.length === 0) return;
+  if (config.readOnlyProjectIds === null) {
+    throw new TildaEngineError(
+      "TASK_SOURCE_CLASSIFICATION_REQUIRED",
+      "Write authority is unavailable until the permanent read-only source corpus is configured.",
+    );
+  }
+  if (targets.some((target) => config.readOnlyProjectIds?.includes(target.projectId))) {
+    throw new TildaEngineError(
+      "TASK_SOURCE_READ_ONLY",
+      "A permanent source-corpus project cannot be included in task write or publication scope.",
+    );
+  }
 }
 
 export interface McpRuntimeCapability {
@@ -51,18 +195,25 @@ export interface McpRuntimeCapability {
  */
 export const DEFAULT_MCP_RUNTIME_CAPABILITIES: readonly McpRuntimeCapability[] = [
   {
+    capability: "mcp.capability.learning",
+    adapter: "adapter-session-learning-v1",
+    status: "AVAILABLE_WITH_FRESH_AUTHORITY",
+    executionAvailable: true,
+    reason: "Requires a durable idempotency claim, exact copy-test target, and one pinned task lineage across trace, replay, and restore.",
+  },
+  {
     capability: "standard.field.patch",
     adapter: "standard-field-v1",
     status: "AVAILABLE_WITH_FRESH_AUTHORITY",
     executionAvailable: true,
-    reason: "Requires a fresh exact loopback browser authority and allowlisted lab record.",
+    reason: "Requires a fresh exact task authority, bound record identity, snapshot, and reread verification.",
   },
   {
     capability: "t123.code.replace",
     adapter: "t123-code-v1",
     status: "AVAILABLE_WITH_FRESH_AUTHORITY",
     executionAvailable: true,
-    reason: "Requires a fresh exact loopback browser authority and allowlisted lab record.",
+    reason: "Requires a fresh exact task authority, bound T123 record, snapshot, and reread verification.",
   },
   {
     capability: "zero.leaf.patch",
@@ -86,6 +237,20 @@ export const DEFAULT_MCP_RUNTIME_CAPABILITIES: readonly McpRuntimeCapability[] =
     reason: "Requires a fresh exact loopback authority and strict appended-shape clone transition.",
   },
   {
+    capability: "zero.property.patch",
+    adapter: "zero-model-v1",
+    status: "AVAILABLE_WITH_FRESH_AUTHORITY",
+    executionAvailable: true,
+    reason: "Requires fresh exact task authority, expected basic element type, and one existing own primitive field.",
+  },
+  {
+    capability: "zero.element.clone",
+    adapter: "zero-model-v1",
+    status: "AVAILABLE_WITH_FRESH_AUTHORITY",
+    executionAvailable: true,
+    reason: "Requires fresh exact task authority, expected basic element type, finite offsets, and clone reread verification.",
+  },
+  {
     capability: "page.seo.patch",
     adapter: "page-settings-v1",
     status: "AVAILABLE_WITH_FRESH_AUTHORITY",
@@ -104,21 +269,42 @@ export const DEFAULT_MCP_RUNTIME_CAPABILITIES: readonly McpRuntimeCapability[] =
     adapter: "publication-v1",
     status: "AVAILABLE_WITH_FRESH_AUTHORITY",
     executionAvailable: true,
-    reason: "Requires a fresh exact lab page authority, explicit idempotency key, and editor reread reconciliation.",
+    reason: "Requires explicit task publication authority for the exact page, an idempotency key, and editor reread reconciliation.",
   },
   {
     capability: "page.unpublish",
     adapter: "publication-v1",
     status: "AVAILABLE_WITH_FRESH_AUTHORITY",
     executionAvailable: true,
-    reason: "Requires a fresh exact lab page authority, explicit idempotency key, and editor reread reconciliation.",
+    reason: "Requires explicit task unpublication authority for the exact page, an idempotency key, and editor reread reconciliation.",
   },
   {
     capability: "page.lifecycle.duplicate_verify_reorder_restore_cleanup",
     adapter: "page-lifecycle-v1",
     status: "AVAILABLE_WITH_FRESH_AUTHORITY",
     executionAvailable: true,
-    reason: "Runs only the fixed duplicate-parity-reorder-restore-temp-cleanup transaction on the exact lab source.",
+    reason: "Runs only the typed duplicate-parity-reorder-restore-temp-cleanup transaction on the exact task-authorized source.",
+  },
+  {
+    capability: "page.reference.clone",
+    adapter: "reference-page-v1",
+    status: "AVAILABLE_WITH_FRESH_AUTHORITY",
+    executionAvailable: true,
+    reason: "Creates one same-project unpublished reference clone and returns a process-owned cleanup receipt.",
+  },
+  {
+    capability: "page.reference.cleanup",
+    adapter: "reference-page-v1",
+    status: "AVAILABLE_WITH_FRESH_AUTHORITY",
+    executionAvailable: true,
+    reason: "Removes only the exact unconsumed reference-page receipt created by the active task.",
+  },
+  {
+    capability: "standard.template.add",
+    adapter: "known-template-add-v1",
+    status: "AVAILABLE_WITH_FRESH_AUTHORITY",
+    executionAvailable: true,
+    reason: "Adds one reproduced 128, 778, 131, or 396 template and verifies the exact record-set delta.",
   },
   {
     capability: "page.verify_live",
@@ -298,6 +484,9 @@ function targetOf(input: Readonly<Record<string, unknown>>): TildaMcpTarget | nu
 }
 
 export class EngineTildaMcpService implements TildaMcpService {
+  readonly #referenceReceipts = new Map<string, ReferencePageReceipt>();
+  readonly #structuralJournal = new Map<string, StructuralJournalEntry>();
+
   constructor(
     readonly config: ResearchConfig,
     readonly engine: TildaChangeSetEngine,
@@ -305,6 +494,12 @@ export class EngineTildaMcpService implements TildaMcpService {
     readonly publicVerifier: PublicPageVerifier,
     readonly runtimeCapabilities: readonly McpRuntimeCapability[] = DEFAULT_MCP_RUNTIME_CAPABILITIES,
     readonly pageLifecycle: PageLifecycleController | null = null,
+    readonly auditProvider: TildaAuditProvider | null = null,
+    readonly learningWorkflow: LearningWorkflow | null = null,
+    readonly taskAuthority = new TaskAuthorityManager(),
+    readonly captureBinding: TrustedBindingCaptureProvider = captureTrustedLiveBinding,
+    readonly referencePages: TaskScopedReferencePageLifecycleController | null = null,
+    readonly knownTemplates: KnownTemplateAddController | null = null,
   ) {}
 
   private capabilityStatus(capability: string): McpRuntimeCapability {
@@ -315,6 +510,28 @@ export class EngineTildaMcpService implements TildaMcpService {
       executionAvailable: false,
       reason: "No executable MCP transport is registered for this capability.",
     };
+    if (
+      capability === PAGE_LIFECYCLE_CAPABILITY &&
+      !(CHANGE_OPERATIONS as readonly string[]).includes("page.lifecycle")
+    ) {
+      return {
+        ...configured,
+        status: "TRANSPORT_UNAVAILABLE",
+        executionAvailable: false,
+        reason: "The fixed page lifecycle has no typed ChangeOperation authority contract.",
+      };
+    }
+    if (
+      capability === "mcp.capability.learning" &&
+      (this.learningWorkflow === null || !this.learningWorkflow.executionAvailable())
+    ) {
+      return {
+        ...configured,
+        status: "TRANSPORT_UNAVAILABLE",
+        executionAvailable: false,
+        reason: "Non-dry learning requires both a typed provider and a durable execution journal.",
+      };
+    }
     if (capability === PAGE_LIFECYCLE_CAPABILITY && this.pageLifecycle === null) {
       return {
         ...configured,
@@ -405,71 +622,93 @@ export class EngineTildaMcpService implements TildaMcpService {
             summary: "Returned transport-composition status; unavailable transports are not executable.",
             verification: {
               capabilities: this.capabilityReport(),
+              ...(this.learningWorkflow === null
+                ? {}
+                : { learnedRecipes: this.learningWorkflow.listRecipes() }),
               reads: {
                 projectInventory: "AVAILABLE_WITH_FRESH_AUTHORITY",
                 exactLabPageAndRecord: "AVAILABLE_WITH_FRESH_AUTHORITY",
                 recordPayload: `OMITTED_BY_DEFAULT; explicit payload is capped at ${MAX_MCP_QUERY_PAYLOAD_BYTES} bytes`,
               },
-              scope: "No generic lifecycle operation is exposed. The one fixed page-lifecycle transaction, publication, unpublish, and public verification remain unavailable until their exact transports are connected; every other capability still requires its exact fresh-authority and target gates.",
+              scope: "Typed lifecycle, publication, unpublication, and public verification are exposed only when their exact transports report available. Every read or mutation still requires the matching fresh task authority and exact target gate.",
             },
           });
+        case "tilda_authorize_task":
+          return await this.authorizeTaskAction(input);
+        case "tilda_audit":
+          return await this.auditAction(input);
+        case "tilda_learn_capability":
+          return await this.learnCapabilityAction(input);
         case "tilda_query":
           return await this.query(input as unknown as QueryInput);
         case "tilda_plan_changeset": {
           const request = object(input.request, "request") as unknown as ChangeRequest;
+          const guard = this.currentTaskGuard();
+          guard.assertRequest(request);
           if (!this.canExecute(request.operation)) {
             return this.blockedCapability(request.operation, exactTarget(request.target));
           }
-          return changeSetResult("plan", await this.engine.plan(request), this.engine);
+          const scoped = new TaskScopedChangeSetEngine(this.engine, guard);
+          return changeSetResult("plan", await scoped.plan(request), this.engine);
         }
         case "tilda_apply_changeset": {
           const changeSetId = String(input.changeSetId ?? "");
           const changeSet = this.engine.store.loadChangeSet(changeSetId);
+          const guard = this.currentTaskGuard();
+          if (input.dryRun !== false) guard.assertRead(changeSet.target);
+          else guard.assertChange(changeSet.operation, changeSet.target);
           if (!this.canExecute(changeSet.capability)) {
             return this.blockedCapability(changeSet.capability, changeSet.target);
           }
           const key = String(input.idempotencyKey ?? "");
+          const scoped = new TaskScopedChangeSetEngine(this.engine, guard);
           return changeSetResult(
             "apply",
-            await this.engine.apply(changeSetId, input.dryRun !== false, key),
+            await scoped.apply(changeSetId, input.dryRun !== false, key),
             this.engine,
           );
         }
         case "tilda_verify_changeset": {
           const changeSet = this.engine.store.loadChangeSet(String(input.changeSetId ?? ""));
+          const guard = this.currentTaskGuard();
+          guard.assertRead(changeSet.target);
           if (!this.canExecute(changeSet.capability)) {
             return this.blockedCapability(changeSet.capability, changeSet.target);
           }
+          const scoped = new TaskScopedChangeSetEngine(this.engine, guard);
           return changeSetResult(
             "verify",
-            await this.engine.verify(changeSet.changeSetId),
+            await scoped.verify(changeSet.changeSetId),
             this.engine,
           );
         }
-        case "tilda_rollback_changeset":
-          {
-            const changeSet = this.engine.store.loadChangeSet(String(input.changeSetId ?? ""));
-            if (!this.canExecute(changeSet.capability)) {
-              return this.blockedCapability(changeSet.capability, changeSet.target);
-            }
+        case "tilda_rollback_changeset": {
+          const changeSet = this.engine.store.loadChangeSet(String(input.changeSetId ?? ""));
+          const guard = this.currentTaskGuard();
+          if (input.dryRun !== false) guard.assertRead(changeSet.target);
+          else guard.assertRollback(changeSet.operation, changeSet.target);
+          if (!this.canExecute(changeSet.capability)) {
+            return this.blockedCapability(changeSet.capability, changeSet.target);
+          }
+          const scoped = new TaskScopedChangeSetEngine(this.engine, guard);
           return changeSetResult(
             "rollback",
-            await this.engine.rollback(
+            await scoped.rollback(
               changeSet.changeSetId,
               input.dryRun !== false,
               String(input.idempotencyKey ?? ""),
             ),
             this.engine,
           );
-          }
+        }
         case "tilda_publish":
-          return this.publicationAction("publish", input);
+          return await this.publicationAction("publish", input);
         case "tilda_unpublish":
-          return this.publicationAction("unpublish", input);
+          return await this.publicationAction("unpublish", input);
         case "tilda_verify_live":
-          return this.verifyLive(input);
+          return await this.verifyLive(input);
         case "tilda_page_lifecycle":
-          return this.pageLifecycleAction(input);
+          return await this.pageLifecycleAction(input);
       }
     } catch (error) {
       const code = errorCode(error);
@@ -484,10 +723,222 @@ export class EngineTildaMcpService implements TildaMcpService {
     }
   }
 
+  private async authorizeTaskAction(
+    input: Readonly<Record<string, unknown>>,
+  ): Promise<TildaMcpResult> {
+    if (typeof input.taskDescription !== "string") {
+      throw new TildaEngineError("INVALID_INPUT", "taskDescription must be bounded text.");
+    }
+    if (!Array.isArray(input.observeTargets) || !Array.isArray(input.writeTargets)) {
+      throw new TildaEngineError("INVALID_INPUT", "Task authority requires exact target arrays.");
+    }
+    if (!Array.isArray(input.allowedOperations)) {
+      throw new TildaEngineError("INVALID_INPUT", "allowedOperations must be an array.");
+    }
+    const observeTargets = input.observeTargets.map((target) => {
+      const parsed = exactTarget(target);
+      if (parsed === null) throw new TildaEngineError("TARGET_INVALID", "Invalid observe target.");
+      return parsed;
+    });
+    const writeTargets = input.writeTargets.map((target) => {
+      const parsed = exactTarget(target);
+      if (parsed === null) throw new TildaEngineError("TARGET_INVALID", "Invalid write target.");
+      return parsed;
+    });
+    let publication: TaskPublicationGrant | undefined;
+    if (input.publication !== undefined) {
+      const rawPublication = object(input.publication, "publication");
+      if (!Array.isArray(rawPublication.actions) || !Array.isArray(rawPublication.targets)) {
+        throw new TildaEngineError("INVALID_INPUT", "Publication actions and targets are required.");
+      }
+      const targets = rawPublication.targets.map((target) => {
+        const parsed = exactTarget(target);
+        if (parsed?.kind !== "page") {
+          throw new TildaEngineError("TARGET_INVALID", "Publication requires exact page targets.");
+        }
+        return parsed;
+      });
+      publication = {
+        actions: rawPublication.actions as ("publish" | "unpublish")[],
+        targets,
+      };
+    }
+    let binding: TrustedBindingCapture;
+    try {
+      binding = await this.captureBinding(this.config);
+    } catch (error) {
+      this.taskAuthority.clear();
+      throw error;
+    }
+    if (binding.status !== "BOUND") {
+      this.taskAuthority.clear();
+      throw new TildaEngineError(binding.code, binding.message);
+    }
+    assertTargetsInFreshInventory(binding, [
+      ...observeTargets,
+      ...writeTargets,
+      ...(publication?.targets ?? []),
+    ]);
+    assertWriteTargetsOutsidePermanentSourceCorpus(this.config, [
+      ...writeTargets,
+      ...(publication?.targets ?? []),
+    ]);
+    if (input.mode === "copy-test") {
+      assertDedicatedCopyTestTargets(this.config, binding, writeTargets);
+    }
+    const current = this.taskAuthority.currentReceipt();
+    if (
+      current !== null &&
+      (current.accountFingerprint !== binding.accountFingerprint ||
+        current.inventoryHash !== binding.inventoryHash)
+    ) {
+      this.taskAuthority.clear();
+    }
+    const grantInput: MintTaskAuthorityInput = {
+      taskDescription: input.taskDescription,
+      mode: input.mode as MintTaskAuthorityInput["mode"],
+      observeTargets,
+      writeTargets,
+      allowedOperations: input.allowedOperations as ChangeOperation[],
+      binding: {
+        accountFingerprint: binding.accountFingerprint,
+        inventoryHash: binding.inventoryHash,
+      },
+      inventory: binding.inventory,
+      ...(publication === undefined ? {} : { publication }),
+      ...(typeof input.ttlMs === "number" ? { ttlMs: input.ttlMs } : {}),
+    };
+    const receipt = this.taskAuthority.currentGuard() === null
+      ? this.taskAuthority.mint(grantInput)
+      : this.taskAuthority.replace(grantInput);
+    return baseResult({
+      ok: true,
+      code: "TASK_AUTHORIZED",
+      summary: `Activated one ${receipt.mode} task authority until ${receipt.expiresAt}.`,
+      stateChanged: true,
+      capability: "task.authority",
+      adapter: "task-authority-v1",
+      verification: { authority: receipt },
+    });
+  }
+
+  private currentTaskGuard(): TaskAuthorityGuard {
+    return this.taskAuthority.requireGuard();
+  }
+
+  /** Reserved for operations that do not open their own fresh browser authority. */
+  private async freshTaskAuthority(): Promise<CurrentTaskAuthority> {
+    const guard = this.taskAuthority.requireGuard();
+    const expected = guard.receipt();
+    let binding: TrustedBindingCapture;
+    try {
+      binding = await this.captureBinding(this.config);
+    } catch (error) {
+      if (this.taskAuthority.currentGuard() === guard) this.taskAuthority.clear();
+      throw error;
+    }
+    if (binding.status !== "BOUND") {
+      if (this.taskAuthority.currentGuard() === guard) this.taskAuthority.clear();
+      throw new TildaEngineError(binding.code, binding.message);
+    }
+    if (this.taskAuthority.currentGuard() !== guard) {
+      throw new TildaEngineError(
+        "TASK_AUTHORITY_CHANGED",
+        "Task authority changed while the fresh binding was captured; retry from the new task.",
+      );
+    }
+    if (
+      expected.accountFingerprint !== binding.accountFingerprint ||
+      expected.inventoryHash !== binding.inventoryHash
+    ) {
+      this.taskAuthority.clear();
+      throw new TildaEngineError(
+        "TASK_AUTHORITY_BINDING_MISMATCH",
+        "Fresh account or inventory no longer matches the active task authority.",
+      );
+    }
+    return { guard, binding };
+  }
+
+  private async auditAction(input: Readonly<Record<string, unknown>>): Promise<TildaMcpResult> {
+    const target = exactTarget(object(input.target, "target"));
+    if (target === null) {
+      throw new TildaEngineError("TARGET_INVALID", "Audit requires one exact typed target.");
+    }
+    const guard = this.currentTaskGuard();
+    guard.assertRead(target);
+    const rawChecks = input.checks;
+    const checks = Array.isArray(rawChecks) ? rawChecks : [];
+    const request = {
+      target,
+      checks,
+    } as unknown as AuditRequest;
+    const outcome = await new TypedAuditRunner(this.auditProvider).run(request);
+    return baseResult({
+      ok: outcome.ok,
+      code: outcome.code,
+      summary: outcome.summary,
+      target,
+      capability: "tilda.audit",
+      adapter: outcome.report?.adapter ?? null,
+      verification: outcome.report === undefined ? null : (outcome.report as unknown as Record<string, unknown>),
+      ...(outcome.blockedReasons === undefined ? {} : { blockedReasons: outcome.blockedReasons }),
+    });
+  }
+
+  private async learnCapabilityAction(input: Readonly<Record<string, unknown>>): Promise<TildaMcpResult> {
+    const target = exactTarget(object(input.target, "target"));
+    if (target === null) {
+      throw new TildaEngineError("TARGET_INVALID", "Capability learning requires one exact typed target.");
+    }
+    if (input.action === "publish" || input.action === "unpublish") {
+      throw new TildaEngineError(
+        "LEARNING_PUBLICATION_ACTION_BLOCKED",
+        "Publication cannot be learned as a generic capability action; use the separately authorized publication tools.",
+      );
+    }
+    if (this.learningWorkflow === null) {
+      return baseResult({
+        ok: false,
+        code: "LEARNING_PROVIDER_UNAVAILABLE",
+        summary: "No copy-test learning workflow is connected; no Tilda operation was attempted.",
+        target,
+        capability: typeof input.capability === "string" ? input.capability : null,
+        blockedReasons: ["LEARNING_PROVIDER_UNAVAILABLE"],
+      });
+    }
+    const request = {
+      ...input,
+      target,
+    } as unknown as LearnCapabilityRequest;
+    const guard = this.currentTaskGuard();
+    guard.assertCopyTestWrite(target);
+    const outcome = await this.learningWorkflow.learn(request, guard);
+    return baseResult({
+      ok: outcome.ok,
+      code: outcome.code,
+      summary: outcome.summary,
+      stateChanged: outcome.stateChanged,
+      target: outcome.target,
+      capability: outcome.capability,
+      adapter: outcome.recipe?.adapterId ?? null,
+      verification: {
+        ...(outcome.evidence ?? {}),
+        ...(outcome.recipe === undefined ? {} : { recipe: outcome.recipe }),
+      },
+      ...(outcome.blockedReasons === undefined ? {} : { blockedReasons: outcome.blockedReasons }),
+    });
+  }
+
   private async query(input: QueryInput): Promise<TildaMcpResult> {
     const query = input.query;
+    if (isTargetDiscoveryQuery(query)) {
+      return executeTargetDiscoveryQuery(this.config, query);
+    }
+    const guard = this.currentTaskGuard();
     if (query.kind === "changeset") {
       const record = this.engine.store.loadChangeSet(query.changeSetId);
+      guard.assertRead(record.target);
       return baseResult({
         ok: true,
         code: "CHANGESET_READ",
@@ -509,6 +960,7 @@ export class EngineTildaMcpService implements TildaMcpService {
     }
     if (query.kind === "snapshot") {
       const snapshot = this.engine.store.loadSnapshot(query.snapshotId);
+      guard.assertRead(snapshot.target);
       return baseResult({
         ok: true,
         code: "SNAPSHOT_READ",
@@ -527,11 +979,9 @@ export class EngineTildaMcpService implements TildaMcpService {
       if (query.target.kind !== "project") {
         throw new TildaEngineError("TARGET_KIND_MISMATCH", "Project query requires a project target.");
       }
-      const binding = await captureTrustedLiveBinding(this.config);
-      if (binding.status !== "BOUND") {
-        throw new TildaEngineError(binding.code, binding.message);
-      }
-      const pageIds = binding.inventory.pageOwnership[query.target.projectId];
+      guard.assertRead(query.target);
+      const authority = await this.freshTaskAuthority();
+      const pageIds = authority.binding.inventory.pageOwnership[query.target.projectId];
       if (pageIds === undefined) {
         throw new TildaEngineError("PROJECT_NOT_FOUND", "Project is absent from live inventory.");
       }
@@ -555,16 +1005,20 @@ export class EngineTildaMcpService implements TildaMcpService {
     if (query.kind === "record" && target.kind !== "record") {
       throw new TildaEngineError("TARGET_KIND_MISMATCH", "Record query requires a record target.");
     }
+    if (query.kind === "record_control" && target.kind !== "record") {
+      throw new TildaEngineError("TARGET_KIND_MISMATCH", "Record-control query requires a record target.");
+    }
     if (query.kind === "element" && target.kind !== "element") {
       throw new TildaEngineError("TARGET_KIND_MISMATCH", "Element query requires an element target.");
     }
     if (target.kind === "project") {
       throw new TildaEngineError("TARGET_KIND_MISMATCH", "Page, record, or element target required.");
     }
-    return withLoopbackBrowserReadAuthority(this.config, async (authority) => {
+    guard.assertRead(target);
+    return withLoopbackBrowserReadAuthority(this.config, async (browserAuthority) => {
       const pageTarget = { projectId: target.projectId, pageId: target.pageId };
       if (query.kind === "page_head_code") {
-        const read = await authority.reader.readPageHeadCode(pageTarget);
+        const read = await browserAuthority.reader.readPageHeadCode(pageTarget);
         return baseResult({
           ok: true,
           code: "PAGE_HEAD_CODE_READ",
@@ -578,7 +1032,7 @@ export class EngineTildaMcpService implements TildaMcpService {
           },
         });
       }
-      const page = await authority.reader.readEditorPage(pageTarget);
+      const page = await browserAuthority.reader.readEditorPage(pageTarget);
       if (query.kind === "page") {
         return baseResult({
           ok: true,
@@ -591,6 +1045,36 @@ export class EngineTildaMcpService implements TildaMcpService {
             changed: page.changed,
             published: page.published,
             records: page.records,
+          },
+        });
+      }
+      if (query.kind === "record_control") {
+        if (target.kind !== "record") {
+          throw new TildaEngineError("TARGET_KIND_MISMATCH", "Record-control query requires a record target.");
+        }
+        const reveal = await browserAuthority.reader.revealExactRecordControl(
+          {
+            projectId: target.projectId,
+            pageId: target.pageId,
+            recordId: target.recordId,
+          },
+          query.controlKey,
+        );
+        return baseResult({
+          ok: true,
+          code: "RECORD_CONTROL_REVEALED",
+          summary: "Revealed the hover-only editor control owned by the exact record without clicking or coordinates.",
+          target,
+          capability: "record.control.reveal",
+          adapter: "browser-authority-v1",
+          verification: {
+            identity: reveal.identity,
+            controlKey: reveal.controlKey,
+            ownerRecordId: reveal.ownerRecordId,
+            tagName: reveal.tagName,
+            connected: reveal.connected,
+            clicked: false,
+            coordinatesUsed: false,
           },
         });
       }
@@ -608,20 +1092,33 @@ export class EngineTildaMcpService implements TildaMcpService {
       };
       const read =
         identity.recordCode === "T123"
-          ? await authority.reader.readT123Content(labRecord)
+          ? await browserAuthority.reader.readT123Content(labRecord)
           : identity.recordCode === "T396"
-            ? await authority.reader.readZeroServerRepresentation(labRecord)
-            : await authority.reader.readStandardSettings(labRecord);
+            ? await browserAuthority.reader.readZeroServerRepresentation(labRecord)
+            : await browserAuthority.reader.readStandardSettings(labRecord);
       const includePayload = "includePayload" in query && query.includePayload === true;
-      let decodedT123Code: string | undefined;
-      if (includePayload && identity.recordCode === "T123") {
+      let decodedT123Code: Record<string, unknown> | undefined;
+      let t123ExternalDependencies: readonly Record<string, unknown>[] | undefined;
+      if (query.kind === "record" && includePayload && identity.recordCode === "T123") {
         const payload = object(read.payload, "T123 payload");
         const record = object(payload.record, "T123 record");
         if (Object.hasOwn(record, "code") && typeof record.code !== "string") {
           throw new TildaEngineError("ADAPTER_RESPONSE_REJECTED", "T123 response code is not text.");
         }
-        decodedT123Code = decodeT123Once(typeof record.code === "string" ? record.code : "");
+        const decoded = decodeT123Once(typeof record.code === "string" ? record.code : "");
+        decodedT123Code = boundedQueryPayload(decoded, true);
+        t123ExternalDependencies = extractT123ExternalDependencies(decoded).map(
+          ({ url, kind, offset }) => ({ url, kind, offset }),
+        );
       }
+      const payload = query.kind === "element"
+        ? {
+            included: false,
+            reason: "ELEMENT_CONTAINER_PAYLOAD_OMITTED",
+            bytes: null,
+            hash: null,
+          }
+        : boundedQueryPayload(read.payload, includePayload);
       return baseResult({
         ok: true,
         code: query.kind === "element" ? "ELEMENT_CONTAINER_READ" : "RECORD_READ",
@@ -631,18 +1128,21 @@ export class EngineTildaMcpService implements TildaMcpService {
         adapter: `browser-${identity.recordCode.toLowerCase()}-read-v1`,
         verification: {
           identity: read.identity,
-          payload: boundedQueryPayload(
-            read.payload,
-            includePayload,
-          ),
-          ...(includePayload && read.writableField !== undefined
+          payload,
+          ...(query.kind === "record" && includePayload && read.writableField !== undefined
             ? { writableField: read.writableField }
             : {}),
           ...(decodedT123Code === undefined ? {} : { decodedCode: decodedT123Code }),
+          ...(t123ExternalDependencies === undefined
+            ? {}
+            : {
+                externalDependencies: t123ExternalDependencies,
+                externalDependencyCount: t123ExternalDependencies.length,
+              }),
           elementFilter: target.kind === "element" ? target.elementId : null,
         },
       });
-    });
+    }, { taskGuard: guard });
   }
 
   private async publicationAction(
@@ -654,17 +1154,21 @@ export class EngineTildaMcpService implements TildaMcpService {
       throw new TildaEngineError("TARGET_KIND_MISMATCH", "Publication requires an exact page target.");
     }
     const capability = `page.${action}`;
+    const guard = this.currentTaskGuard();
+    if (input.dryRun === false) guard.assertPublication(action, target);
+    else guard.assertRead(target);
     if (!this.canExecute(capability)) {
       return this.blockedCapability(capability, target);
     }
-    const result = await this.publication.execute(action, target, {
+    const scoped = new TaskScopedPublicationController(this.publication, guard);
+    const result = await scoped.execute(action, target, {
       dryRun: input.dryRun !== false,
       ...(typeof input.idempotencyKey === "string" ? { idempotencyKey: input.idempotencyKey } : {}),
     });
     return baseResult({
       ok: true,
       code: result.dryRun ? "DRY_RUN" : action === "publish" ? "PAGE_PUBLISHED" : "PAGE_UNPUBLISHED",
-      summary: `${action} ${result.dryRun ? "plan" : "editor reread"} completed for the exact lab page.`,
+      summary: `${action} ${result.dryRun ? "plan" : "editor reread"} completed for the exact task-authorized page.`,
       stateChanged: result.stateChanged,
       target,
       capability,
@@ -680,45 +1184,207 @@ export class EngineTildaMcpService implements TildaMcpService {
     if (target?.kind !== "page") {
       throw new TildaEngineError("TARGET_KIND_MISMATCH", "Page lifecycle requires an exact page target.");
     }
-    if (!this.canExecute(PAGE_LIFECYCLE_CAPABILITY)) {
-      return this.blockedCapability(PAGE_LIFECYCLE_CAPABILITY, target);
+    const action = String(input.action ?? "");
+    const typedOperation = ({
+      fixed_roundtrip: "page.lifecycle",
+      create_from_reference: "page.reference.clone",
+      cleanup_reference: "page.reference.cleanup",
+      add_known_template: "standard.template.add",
+    } as const)[action as "fixed_roundtrip" | "create_from_reference" | "cleanup_reference" | "add_known_template"];
+    if (typedOperation === undefined) {
+      throw new TildaEngineError("INVALID_INPUT", "Unsupported page lifecycle action.");
     }
-    if (this.pageLifecycle === null) {
+    const guard = this.currentTaskGuard();
+    if (input.dryRun !== false) guard.assertRead(target);
+    else guard.assertChange(typedOperation, target);
+    const dryRun = input.dryRun !== false;
+
+    if (action === "fixed_roundtrip") {
+      if (!this.canExecute(PAGE_LIFECYCLE_CAPABILITY) || this.pageLifecycle === null) {
+        return this.blockedCapability(PAGE_LIFECYCLE_CAPABILITY, target);
+      }
+      const result = await this.pageLifecycle.execute({
+        target,
+        idempotencyKey: String(input.idempotencyKey ?? ""),
+        dryRun,
+      });
       return baseResult({
-        ok: false,
-        code: "CAPABILITY_TRANSPORT_UNAVAILABLE",
-        summary: "The fixed page-lifecycle transport is not connected to the browser authority.",
+        ok: true,
+        code: result.dryRun ? "DRY_RUN" : "PAGE_LIFECYCLE_RESTORED",
+        summary: result.dryRun
+          ? "The fixed page lifecycle transaction was dry-run only; no remote action was attempted."
+          : "The fixed page lifecycle transaction proved duplicate cleanup and exact source-page restoration.",
+        stateChanged: result.stateChanged,
         target,
         capability: PAGE_LIFECYCLE_CAPABILITY,
         adapter: "page-lifecycle-v1",
-        blockedReasons: ["TRANSPORT_UNAVAILABLE"],
+        snapshotId: result.snapshotId,
+        changeSetId: result.changeSetId,
+        verification: {
+          transaction: "duplicate_verify_reorder_restore_cleanup",
+          dryRun: result.dryRun,
+          baseline: result.baseline,
+          restored: result.restored,
+        },
+        rollbackAvailable: false,
       });
     }
-    const result = await this.pageLifecycle.execute({
-      target,
-      idempotencyKey: String(input.idempotencyKey ?? ""),
-      dryRun: input.dryRun !== false,
+
+    if (action === "create_from_reference") {
+      if (this.referencePages === null) return this.blockedCapability(typedOperation, target);
+      if (dryRun) {
+        this.taskAuthority.assertReferenceLineageReady(target);
+        return baseResult({
+          ok: true,
+          code: "DRY_RUN",
+          summary: "Reference-page clone is authorized and ready; no page was created.",
+          target,
+          capability: typedOperation,
+          adapter: "reference-page-v1",
+          verification: { action, unpublishedRequired: true, cleanupReceiptRequired: true },
+        });
+      }
+      return this.#runStructuralOnce(input, { action, target }, async () => {
+        const created = await this.referencePages!.createPageFromReference(target);
+        this.#referenceReceipts.set(created.receipt.receiptId, created.receipt);
+        return baseResult({
+          ok: true,
+          code: "REFERENCE_PAGE_CREATED",
+          summary: "Created one same-project unpublished page from the exact reference and verified record-family parity.",
+          stateChanged: true,
+          target: created.receipt.created,
+          capability: typedOperation,
+          adapter: "reference-page-v1",
+          verification: {
+            action,
+            receiptId: created.receipt.receiptId,
+            source: created.receipt.source,
+            created: created.receipt.created,
+            sourceRecordCount: created.evidence.sourceRecordIds.length,
+            createdRecordCount: created.evidence.createdRecordIds.length,
+            recordFamilyParity: true,
+            createdUnpublished: true,
+          },
+          rollbackAvailable: true,
+        });
+      });
+    }
+
+    if (action === "cleanup_reference") {
+      if (this.referencePages === null) return this.blockedCapability(typedOperation, target);
+      const receiptId = String(input.receiptId ?? "");
+      const receipt = this.#referenceReceipts.get(receiptId);
+      if (
+        receipt === undefined ||
+        receipt.source.projectId !== target.projectId ||
+        receipt.source.pageId !== target.pageId
+      ) {
+        throw new TildaEngineError(
+          "REFERENCE_RECEIPT_REJECTED",
+          "Cleanup requires the unconsumed process-owned receipt for this exact source page.",
+        );
+      }
+      if (dryRun) {
+        return baseResult({
+          ok: true,
+          code: "DRY_RUN",
+          summary: "Exact reference-page cleanup receipt is available; no page was removed.",
+          target: receipt.created,
+          capability: typedOperation,
+          adapter: "reference-page-v1",
+          verification: { action, receiptId, source: receipt.source, created: receipt.created },
+          rollbackAvailable: true,
+        });
+      }
+      return this.#runStructuralOnce(input, { action, target, receiptId }, async () => {
+        this.#referenceReceipts.delete(receiptId);
+        const cleaned = await this.referencePages!.cleanupCreatedReference(receipt);
+        return baseResult({
+          ok: true,
+          code: "REFERENCE_PAGE_CLEANED",
+          summary: "Removed only the receipt-created page and proved the reference source remained present.",
+          stateChanged: true,
+          target: receipt.created,
+          capability: typedOperation,
+          adapter: "reference-page-v1",
+          verification: {
+            action,
+            receiptId,
+            source: cleaned.source,
+            removedPageId: cleaned.removedPageId,
+            removedPageAbsent: cleaned.removedPageAbsent,
+            activePageCount: cleaned.activePageIds.length,
+          },
+          rollbackAvailable: false,
+        });
+      });
+    }
+
+    if (this.knownTemplates === null) return this.blockedCapability(typedOperation, target);
+    const templateId = String(input.templateId ?? "") as KnownTemplateId;
+    if (dryRun) {
+      return baseResult({
+        ok: true,
+        code: "DRY_RUN",
+        summary: "Known-template add is authorized and ready; no block was created.",
+        target,
+        capability: typedOperation,
+        adapter: "known-template-add-v1",
+        verification: { action, templateId },
+      });
+    }
+    return this.#runStructuralOnce(input, { action, target, templateId }, async () => {
+      const receipt = await this.knownTemplates!.add(target, templateId);
+      return baseResult({
+        ok: true,
+        code: "KNOWN_TEMPLATE_ADDED",
+        summary: "Added one reproduced standard/T123/Zero template and verified the exact record-set delta.",
+        stateChanged: true,
+        target: receipt.target,
+        capability: typedOperation,
+        adapter: "known-template-add-v1",
+        verification: {
+          action,
+          templateId: receipt.templateId,
+          recordType: receipt.recordType,
+          recordCode: receipt.recordCode,
+        },
+        rollbackAvailable: false,
+      });
     });
-    return baseResult({
-      ok: true,
-      code: result.dryRun ? "DRY_RUN" : "PAGE_LIFECYCLE_RESTORED",
-      summary: result.dryRun
-        ? "The fixed page lifecycle transaction was dry-run only; no remote action was attempted."
-        : "The fixed page lifecycle transaction proved duplicate cleanup and exact source-page restoration.",
-      stateChanged: result.stateChanged,
-      target,
-      capability: PAGE_LIFECYCLE_CAPABILITY,
-      adapter: "page-lifecycle-v1",
-      snapshotId: result.snapshotId,
-      changeSetId: result.changeSetId,
-      verification: {
-        transaction: "duplicate_verify_reorder_restore_cleanup",
-        dryRun: result.dryRun,
-        baseline: result.baseline,
-        restored: result.restored,
-      },
-      rollbackAvailable: false,
-    });
+  }
+
+  async #runStructuralOnce(
+    input: Readonly<Record<string, unknown>>,
+    intent: Readonly<Record<string, unknown>>,
+    action: () => Promise<TildaMcpResult>,
+  ): Promise<TildaMcpResult> {
+    const key = structuralKeyHash(String(input.idempotencyKey ?? ""));
+    const intentHash = canonicalHash(intent);
+    const existing = this.#structuralJournal.get(key);
+    if (existing !== undefined) {
+      if (existing.intentHash !== intentHash) {
+        throw new TildaEngineError("IDEMPOTENCY_CONFLICT", "Structural idempotency key was used for another intent.");
+      }
+      if (existing.state === "SUCCEEDED" && existing.result !== undefined) {
+        return structuredClone(existing.result);
+      }
+      throw new TildaEngineError(
+        "AMBIGUOUS_RETRY_BLOCKED",
+        "The structural action is pending or failed ambiguously; reread inventory instead of retrying.",
+      );
+    }
+    const journal: StructuralJournalEntry = { intentHash, state: "PENDING" };
+    this.#structuralJournal.set(key, journal);
+    try {
+      const result = await action();
+      journal.state = "SUCCEEDED";
+      journal.result = structuredClone(result);
+      return result;
+    } catch (error) {
+      journal.state = "FAILED";
+      throw error;
+    }
   }
 
   private async verifyLive(input: Readonly<Record<string, unknown>>): Promise<TildaMcpResult> {
@@ -726,6 +1392,8 @@ export class EngineTildaMcpService implements TildaMcpService {
     if (target?.kind !== "page") {
       throw new TildaEngineError("TARGET_KIND_MISMATCH", "Live verification requires an exact page target.");
     }
+    const authority = await this.freshTaskAuthority();
+    authority.guard.assertRead(target);
     if (!this.canExecute("page.verify_live")) {
       return this.blockedCapability("page.verify_live", target);
     }
@@ -765,7 +1433,8 @@ export class EngineTildaMcpService implements TildaMcpService {
 
 export function createDefaultTildaMcpService(): EngineTildaMcpService {
   const config = loadConfig();
-  const sessions = new LoopbackAdapterSessionFactory(config);
+  const taskAuthority = new TaskAuthorityManager();
+  const sessions = new LoopbackAdapterSessionFactory(config, taskAuthority);
   const registry = new StaticAdapterRegistry([
     new StandardFieldAdapter(sessions),
     new T123CodeAdapter(sessions),
@@ -775,12 +1444,41 @@ export function createDefaultTildaMcpService(): EngineTildaMcpService {
   ]);
   const engine = new TildaChangeSetEngine(registry, new ChangeSetStore());
   const domains = config.publicTestDomains ?? [];
+  const auditRunner: TildaAuditAuthorityRunner = async (auditConfig, action) =>
+    withLoopbackBrowserReadAuthority(auditConfig, action, {
+      taskGuard: taskAuthority.requireGuard(),
+    });
+  const auditProvider = new LoopbackTildaAuditProvider(config, auditRunner);
+  const learningWorkflow = new CapabilityLearningWorkflow({
+    provider: new AdapterSessionCapabilityLearningProvider({ sessions }),
+    registry: new FileCapabilityRecipeRegistry(
+      resolve(process.cwd(), ".tilda-runtime", "mcp-v1", "learning", "recipes"),
+    ),
+    journal: new FileCapabilityLearningExecutionJournal(
+      resolve(process.cwd(), ".tilda-runtime", "mcp-v1", "learning", "executions"),
+    ),
+  });
+  const referencePages = new TaskScopedReferencePageLifecycleController(
+    new ReferencePageLifecycleController(
+      new LoopbackReferencePageTransport(config, taskAuthority),
+    ),
+    taskAuthority,
+  );
+  const knownTemplates = new KnownTemplateAddController(
+    new LoopbackKnownTemplateAddTransport(config, taskAuthority),
+  );
   return new EngineTildaMcpService(
     config,
     engine,
     new PublicationController(sessions),
     new PublicPageVerifier(domains),
     undefined,
-    new PageLifecycleController(new LoopbackPageLifecycleTransport(config)),
+    new PageLifecycleController(new LoopbackPageLifecycleTransport(config, taskAuthority)),
+    auditProvider,
+    learningWorkflow,
+    taskAuthority,
+    captureTrustedLiveBinding,
+    referencePages,
+    knownTemplates,
   );
 }

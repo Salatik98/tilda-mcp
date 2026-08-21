@@ -6,6 +6,9 @@ const REQUEST_TIMEOUT_MS = 45_000;
 const REQUIRED_TOOLS = Object.freeze([
   "tilda_status",
   "tilda_capabilities",
+  "tilda_authorize_task",
+  "tilda_audit",
+  "tilda_learn_capability",
   "tilda_query",
   "tilda_plan_changeset",
   "tilda_apply_changeset",
@@ -39,12 +42,12 @@ async function main(): Promise<void> {
   transport.stderr?.on("data", () => {
     childStderrObserved = true;
   });
-  const client = new Client({ name: "tilda-agent-os-stdio-smoke", version: "0.2.0-prealpha" });
+  const client = new Client({ name: "tilda-agent-os-stdio-smoke", version: "1.0.0" });
 
   try {
     await client.connect(transport, { timeout: REQUEST_TIMEOUT_MS });
     const server = client.getServerVersion();
-    if (server?.name !== "tilda-agent-os" || typeof server.version !== "string") {
+    if (server?.name !== "tilda-agent-os" || server.version !== "1.0.0") {
       throw new Error("Unexpected MCP server identity.");
     }
 
@@ -53,6 +56,9 @@ async function main(): Promise<void> {
     const missingTools = REQUIRED_TOOLS.filter((toolName) => !toolNames.has(toolName));
     if (missingTools.length > 0) {
       throw new Error(`Required MCP tools are missing: ${missingTools.join(", ")}.`);
+    }
+    if (listed.tools.length !== REQUIRED_TOOLS.length) {
+      throw new Error(`Expected exactly ${REQUIRED_TOOLS.length} MCP tools.`);
     }
 
     const capabilitiesResponse = await client.callTool(

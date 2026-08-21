@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   assertLabPageTarget,
   assertLabProjectTarget,
+  assertLabRecordTarget,
   ConfigurationError,
   hashLiveInventory,
   isWriteAllowlistSyntacticallyValid,
@@ -9,28 +10,41 @@ import {
   loadConfig,
   TargetNotAllowlistedError,
 } from "../../src/research/config.js";
+import { KNOWN_READ_ONLY_SOURCE_PROJECT_IDS } from "../../src/research/known-source-corpus.js";
 
 const MANAGED_KEYS = [
   "TILDA_ACCOUNT_FINGERPRINT",
   "TILDA_INVENTORY_HASH",
+  "TILDA_BINDING_KEY_PATH",
+  "TILDA_BINDING_STATE_PATH",
   "LAB_PROJECT_IDS",
   "LAB_PAGE_TARGETS",
+  "LAB_RECORD_TARGETS",
   "READ_ONLY_PROJECT_IDS",
   "PUBLIC_TEST_DOMAINS",
   "TILDA_PUBLIC_KEY",
   "TILDA_SECRET_KEY",
+  "TILDA_CDP_URL",
 ] as const;
+
+beforeEach(() => {
+  process.env.TILDA_BINDING_KEY_PATH = ".tilda-runtime/unit-test-binding.key";
+  process.env.TILDA_BINDING_STATE_PATH = ".tilda-runtime/unit-test-binding.json";
+});
 
 function liveInventory(overrides: Partial<LiveInventory> = {}): LiveInventory {
   return {
     accountFingerprint: "b".repeat(64),
-    projectIds: ["123", "456", "999", "1001", "1002"],
+    projectIds: ["123", "456", "999", "10001", "10002", "10003", "10004", "10005"],
     pageOwnership: {
       "123": ["9001"],
       "456": ["9002"],
       "999": [],
-      "1001": [],
-      "1002": [],
+      "10001": [],
+      "10002": [],
+      "10003": [],
+      "10004": [],
+      "10005": [],
     },
     ...overrides,
   };
@@ -40,8 +54,9 @@ function configureBoundLab(inventory = liveInventory()): void {
   process.env.TILDA_ACCOUNT_FINGERPRINT = inventory.accountFingerprint;
   process.env.TILDA_INVENTORY_HASH = hashLiveInventory(inventory);
   process.env.LAB_PROJECT_IDS = "123,456";
-  process.env.READ_ONLY_PROJECT_IDS = "999,1001,1002";
+  process.env.READ_ONLY_PROJECT_IDS = "999,10001,10002,10003,10004,10005";
   process.env.LAB_PAGE_TARGETS = "123:9001,456:9002";
+  process.env.LAB_RECORD_TARGETS = "UNSPECIFIED";
 }
 
 afterEach(() => {
@@ -74,7 +89,7 @@ describe("research configuration", () => {
 
   it("blocks overlapping lab/read-only configuration globally", () => {
     configureBoundLab();
-    process.env.READ_ONLY_PROJECT_IDS = "123,999,1001,1002";
+    process.env.READ_ONLY_PROJECT_IDS = "123,999,10001,10002,10003,10004,10005";
     const config = loadConfig();
 
     expect(isWriteAllowlistSyntacticallyValid(config)).toBe(false);
@@ -85,7 +100,7 @@ describe("research configuration", () => {
 
   it("blocks writes until account fingerprint and inventory hash are configured", () => {
     process.env.LAB_PROJECT_IDS = "123";
-    process.env.READ_ONLY_PROJECT_IDS = "999,1001,1002";
+    process.env.READ_ONLY_PROJECT_IDS = "999,10001,10002,10003,10004,10005";
     const config = loadConfig();
 
     expect(isWriteAllowlistSyntacticallyValid(config)).toBe(false);
@@ -135,6 +150,68 @@ describe("research configuration", () => {
     expect(() => assertLabPageTarget(config, { projectId: "123", pageId: "9001" }, liveInventory())).toThrow(
       /LAB_PAGE_TARGETS is UNSPECIFIED/,
     );
+  });
+
+  it("admits an existing record only from its exact local triple", () => {
+    configureBoundLab();
+    process.env.LAB_RECORD_TARGETS = "123:9001:8000";
+    const config = loadConfig();
+
+    expect(() => assertLabRecordTarget(
+      config,
+      { projectId: "123", pageId: "9001", recordId: "8000" },
+      liveInventory(),
+    )).not.toThrow();
+    expect(() => assertLabRecordTarget(
+      config,
+      { projectId: "123", pageId: "9001", recordId: "8001" },
+      liveInventory(),
+    )).toThrow(/not in LAB_RECORD_TARGETS/);
+    expect(() => assertLabRecordTarget(
+      config,
+      { projectId: "456", pageId: "9002", recordId: "8000" },
+      liveInventory(),
+    )).toThrow(/not in LAB_RECORD_TARGETS/);
+  });
+
+  it("rejects element-bearing and otherwise non-exact runtime record targets", () => {
+    configureBoundLab();
+    process.env.LAB_RECORD_TARGETS = "123:9001:8000";
+    const config = loadConfig();
+    const elementBearing = {
+      projectId: "123",
+      pageId: "9001",
+      recordId: "8000",
+      elementId: "tn-9",
+    };
+    expect(() => assertLabRecordTarget(
+      config,
+      elementBearing as never,
+      liveInventory(),
+    )).toThrow(/must contain exactly projectId, pageId, and recordId/);
+
+    const inheritedElement = Object.create({ elementId: "tn-9" }) as {
+      projectId: string;
+      pageId: string;
+      recordId: string;
+    };
+    inheritedElement.projectId = "123";
+    inheritedElement.pageId = "9001";
+    inheritedElement.recordId = "8000";
+    expect(() => assertLabRecordTarget(config, inheritedElement, liveInventory())).toThrow(
+      /extra or inherited target fields are forbidden/,
+    );
+  });
+
+  it.each([
+    ["record wildcard", "123:9001:*"],
+    ["record leading zero", "123:9001:08000"],
+    ["record missing segment", "123:9001"],
+    ["duplicate record", "123:9001:8000,123:9001:8000"],
+  ])("rejects non-exact LAB_RECORD_TARGETS: %s", (_label, value) => {
+    configureBoundLab();
+    process.env.LAB_RECORD_TARGETS = value;
+    expect(() => loadConfig()).toThrow(ConfigurationError);
   });
 
   it("rejects stale or fabricated live account and inventory bindings", () => {
@@ -206,6 +283,10 @@ describe("research configuration", () => {
     );
   });
 
+  it("ships no private source-corpus identifiers", () => {
+    expect(KNOWN_READ_ONLY_SOURCE_PROJECT_IDS).toEqual([]);
+  });
+
   it("requires every page ID to have exactly one project owner", () => {
     const baseline = liveInventory();
     const duplicateOwnership = liveInventory({
@@ -219,6 +300,26 @@ describe("research configuration", () => {
   it("requires a canonical HMAC fingerprint", () => {
     process.env.TILDA_ACCOUNT_FINGERPRINT = "account-fingerprint-v1";
     expect(() => loadConfig()).toThrow(/lowercase HMAC-SHA-256/);
+  });
+
+  it("keeps the binding key and state inside ignored .tilda-runtime", () => {
+    process.env.TILDA_BINDING_KEY_PATH = "binding.key";
+    expect(() => loadConfig()).toThrow(/direct child of ignored \.tilda-runtime/);
+
+    process.env.TILDA_BINDING_KEY_PATH = ".tilda-runtime/unit-test-binding.key";
+    process.env.TILDA_BINDING_STATE_PATH = "../binding.json";
+    expect(() => loadConfig()).toThrow(/direct child of ignored \.tilda-runtime/);
+
+    process.env.TILDA_BINDING_STATE_PATH = ".tilda-runtime/unit-test-binding.key";
+    expect(() => loadConfig()).toThrow(/must be different files/);
+  });
+
+  it("accepts only a loopback CDP endpoint", () => {
+    process.env.TILDA_CDP_URL = "https://example.com:9222";
+    expect(() => loadConfig()).toThrow(/loopback HTTP endpoint/);
+
+    process.env.TILDA_CDP_URL = "http://127.0.0.1:9222";
+    expect(loadConfig().cdpUrl).toBe("http://127.0.0.1:9222");
   });
 
   it("does not consider a partial official API credential pair configured", () => {

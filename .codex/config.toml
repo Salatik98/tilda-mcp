@@ -5,5 +5,10 @@ command = "pnpm"
 args = ["mcp"]
 startup_timeout_sec = 20
 tool_timeout_sec = 180
-default_tools_approval_mode = "writes"
+# One human approval grants the bounded task; the server enforces the exact
+# target, operation, freshness, rollback, and publication gates afterwards.
+default_tools_approval_mode = "approve"
 enabled = true
+
+[mcp_servers.tilda_agent_os.tools.tilda_authorize_task]
+approval_mode = "prompt"
